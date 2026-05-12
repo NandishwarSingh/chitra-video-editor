@@ -1,18 +1,17 @@
 import {
   Activity,
   ArrowLeft,
-  Code2,
   Copy,
   Download,
   FileArchive,
   Film,
   FolderOpen,
   Maximize2,
+  Music,
   Pause,
   Pencil,
   Play,
   Plus,
-  RotateCcw,
   Scissors,
   Search,
   Settings,
@@ -43,21 +42,28 @@ import {
   useRef,
   useState,
 } from 'react';
-import { resolveCommand } from './commandPalette';
+import { ChatPanel } from './ChatPanel';
 import { DEFAULT_EFFECT_SETTINGS, hasActiveEffects } from './effects';
-import { compileEditArrayProgram } from './editCompiler';
 import { createEditArrayFromRuntime, stringifyEditArray } from './editArrayLanguage';
-import { createEditRepairPlan } from './editRepairLoop';
-import { createMediaFingerprint, createTypedVideoFile, detectMediaCapabilities, isSupportedVideoFile, shouldUsePreviewProxy } from './mediaEngine';
+import {
+  createMediaFingerprint,
+  createTypedMediaFile,
+  detectMediaCapabilities,
+  detectMediaKind,
+  isSupportedMediaFile,
+  shouldUsePreviewProxy,
+} from './mediaEngine';
 import { performanceMonitor, usePerformanceSnapshot } from './performanceMonitor';
 import { usePreviewCompositor } from './previewCompositor';
 import {
   getActiveTextOverlays,
   getAssetById,
+  getAudioClipsAtTime,
+  getAudioTracksTopFirst,
   getClipAtTime,
   getClipDuration,
   getClipEnd,
-  getClipsAtTime,
+  getDefaultAudioTrackId,
   getDefaultVideoTrackId,
   getFirstClipByTimelineOrder,
   getNextClipAfter,
@@ -66,6 +72,7 @@ import {
   getSelectedClip,
   getSelectedText,
   getTrackById,
+  getVideoClipsAtTime,
   getVideoTracksTopFirst,
   idleJobStatus,
   projectReducer,
@@ -101,7 +108,6 @@ import { isClipReorderDrag } from './timelineInteractions';
 import { useTimelineRuntime } from './timelineRuntime';
 import { getTimelineCellWidth, getVirtualTimelineWidth } from './timelineVirtualization';
 import { useVideoThumbnails, type TimelineThumbnail } from './useVideoThumbnails';
-import { createVisualReviewReport } from './visualReviewAgent';
 
 type DragMode =
   | { type: 'clip-move'; clipId: string; startTimelineStart: number; startTrackId: string; startX: number; startY: number }
@@ -140,6 +146,7 @@ const TIMELINE_MIN_WIDTH = 760;
 const TIMELINE_RULER_HEIGHT = 34;
 const TIMELINE_TRACK_TOP = 42;
 const TIMELINE_TRACK_HEIGHT = 64;
+const TIMELINE_AUDIO_TRACK_HEIGHT = 48;
 const TIMELINE_TRACK_GAP = 8;
 const TIMELINE_TEXT_TRACK_HEIGHT = 42;
 const TIMELINE_LABEL_WIDTH = 116;
@@ -185,7 +192,7 @@ function formatAudioMeterDb(dBFS: number) {
 }
 
 function createAsset(file: File): ProjectAsset {
-  const mediaFile = createTypedVideoFile(file, file.name, file.lastModified, file.type);
+  const mediaFile = createTypedMediaFile(file, file.name, file.lastModified, file.type);
   const originalUrl = URL.createObjectURL(mediaFile);
 
   return {
@@ -193,6 +200,7 @@ function createAsset(file: File): ProjectAsset {
     file: mediaFile,
     height: 0,
     id: createId('asset'),
+    kind: detectMediaKind({ name: mediaFile.name, type: mediaFile.type }),
     name: getImportedFileName(file),
     originalUrl,
     playbackUrl: originalUrl,
@@ -259,6 +267,31 @@ function loadVideoMetadata(url: string): Promise<LoadedMetadata> {
   });
 }
 
+function loadAudioMetadata(url: string): Promise<LoadedMetadata> {
+  return new Promise((resolve, reject) => {
+    const audio = document.createElement('audio');
+    audio.preload = 'metadata';
+
+    const cleanup = () => {
+      audio.onloadedmetadata = null;
+      audio.onerror = null;
+    };
+
+    audio.onerror = () => {
+      cleanup();
+      reject(new Error('Unable to read audio metadata.'));
+    };
+
+    audio.onloadedmetadata = () => {
+      const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+      cleanup();
+      resolve({ duration, height: 0, posterUrl: null, width: 0 });
+    };
+
+    audio.src = url;
+  });
+}
+
 async function assertPlayableVideoUrl(url: string) {
   const metadata = await loadVideoMetadata(url);
 
@@ -269,7 +302,7 @@ async function assertPlayableVideoUrl(url: string) {
   return metadata;
 }
 
-function waitForVideoMetadata(video: HTMLVideoElement, timeoutMs = 5000) {
+function waitForVideoMetadata(video: HTMLMediaElement, timeoutMs = 5000) {
   if (video.readyState >= HTMLMediaElement.HAVE_METADATA) {
     return Promise.resolve();
   }
@@ -302,7 +335,7 @@ function waitForVideoMetadata(video: HTMLVideoElement, timeoutMs = 5000) {
   });
 }
 
-function seekVideoSafely(video: HTMLVideoElement, time: number) {
+function seekVideoSafely(video: HTMLMediaElement, time: number) {
   const safeTime = Number.isFinite(video.duration) && video.duration > 0 ? clamp(time, 0, Math.max(0, video.duration - 0.02)) : Math.max(0, time);
 
   try {
@@ -355,6 +388,49 @@ function PreviewLayerVideo({ asset, clip, isPlaying, localTime, playbackRate, st
   }, [clip.sourceIn, isPlaying, localTime, playbackRate]);
 
   return <video className="preview-layer-video" playsInline preload="auto" ref={layerVideoRef} src={asset.playbackUrl} style={style} />;
+}
+
+type PreviewLayerAudioProps = {
+  asset: ProjectAsset;
+  clip: TimelineClip;
+  isPlaying: boolean;
+  localTime: number;
+  playbackRate: number;
+};
+
+function PreviewLayerAudio({ asset, clip, isPlaying, localTime, playbackRate }: PreviewLayerAudioProps) {
+  const layerAudioRef = useRef<HTMLAudioElement>(null);
+
+  useEffect(() => {
+    const audio = layerAudioRef.current;
+
+    if (!audio) {
+      return;
+    }
+
+    audio.playbackRate = playbackRate;
+    audio.muted = clip.muted;
+    audio.volume = clip.muted ? 0 : Math.min(1, clip.volume);
+
+    const targetTime = clip.sourceIn + localTime;
+    if (Math.abs(audio.currentTime - targetTime) > 0.08) {
+      try {
+        audio.currentTime = targetTime;
+      } catch {
+        // Audio not ready yet; will sync on next pass.
+      }
+    }
+
+    if (isPlaying) {
+      void audio.play().catch(() => {
+        // Audio playback can be rejected (autoplay policy / not ready); retry on next prop change.
+      });
+    } else {
+      audio.pause();
+    }
+  }, [clip.muted, clip.sourceIn, clip.volume, isPlaying, localTime, playbackRate]);
+
+  return <audio preload="auto" ref={layerAudioRef} src={asset.playbackUrl} />;
 }
 
 function pickTimelineClipThumbnails(thumbnails: Array<TimelineThumbnail | null>, clip: TimelineClip) {
@@ -435,6 +511,18 @@ function EditorWorkspace({
   const timelineRef = useRef<HTMLDivElement>(null);
   const viewerStageRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioPrimaryRef = useRef<HTMLAudioElement>(null);
+  const activeMediaRef = useRef<HTMLMediaElement | null>(null);
+
+  const attachVideoRef = useCallback((element: HTMLVideoElement | null) => {
+    videoRef.current = element;
+    activeMediaRef.current = element;
+  }, []);
+
+  const attachAudioPrimaryRef = useCallback((element: HTMLAudioElement | null) => {
+    audioPrimaryRef.current = element;
+    activeMediaRef.current = element;
+  }, []);
   const activePlaybackRef = useRef<{
     clipEnd: number;
     clipId: string;
@@ -461,13 +549,11 @@ function EditorWorkspace({
   const dragModeRef = useRef<DragMode>(null);
 
   const [project, dispatch] = useReducer(projectReducer, hydratedProject.history, (value) => value);
-  const [commandQuery, setCommandQuery] = useState('');
   const [exportStatus, setExportStatus] = useState<JobStatus>(idleJobStatus);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isTimelineDropTarget, setIsTimelineDropTarget] = useState(false);
   const [isTheater, setIsTheater] = useState(false);
-  const [loopRange, setLoopRange] = useState(false);
   const [canAutosave, setCanAutosave] = useState(hydratedProject.canAutosave);
   const [importNotice, setImportNotice] = useState<string | null>(hydratedProject.recoveryMessage);
   const [projectName, setProjectName] = useState(record.name);
@@ -475,15 +561,24 @@ function EditorWorkspace({
   const [playbackRate, setPlaybackRate] = useState(1);
   const [playhead, setPlayhead] = useState(0);
   const [saveStatus, setSaveStatus] = useState<'failed' | 'saved' | 'saving'>('saved');
-  const [showEditArray, setShowEditArray] = useState(false);
   const [showProjectSettings, setShowProjectSettings] = useState(false);
   const [showPerfHud, setShowPerfHud] = useState(() => new URLSearchParams(window.location.search).has('perf'));
   const [timelineZoom, setTimelineZoom] = useState(1);
+  const [rightPanelTab, setRightPanelTab] = useState<'chat' | 'inspector'>('inspector');
 
   const present = project.present;
   const duration = getProjectDuration(present);
-  const activeLayerTimelines = getClipsAtTime(present, playhead);
-  const activeTimeline = activeLayerTimelines[activeLayerTimelines.length - 1] ?? null;
+  const activeLayerTimelines = getVideoClipsAtTime(present, playhead);
+  const activeAudioLayerTimelines = getAudioClipsAtTime(present, playhead);
+  const activeTimeline =
+    activeLayerTimelines[activeLayerTimelines.length - 1] ??
+    activeAudioLayerTimelines[activeAudioLayerTimelines.length - 1] ??
+    null;
+  const activePrimaryKind: 'audio' | 'video' | 'none' =
+    activeLayerTimelines.length > 0 ? 'video' : activeAudioLayerTimelines.length > 0 ? 'audio' : 'none';
+  const getActiveMediaElement = useCallback((): HTMLMediaElement | null => {
+    return activeMediaRef.current;
+  }, []);
   const selectedClip = getSelectedClip(present);
   const selectedText = getSelectedText(present);
   const selectedAsset = getAssetById(present, present.selectedAssetId);
@@ -498,8 +593,12 @@ function EditorWorkspace({
   const timelineCellWidth = getTimelineCellWidth(timelineZoom);
   const timelinePixelsPerSecond = TIMELINE_PIXELS_PER_SECOND * timelineZoom;
   const videoTracks = useMemo(() => getVideoTracksTopFirst(present), [present.tracks]);
-  const timelineContentHeight =
-    TIMELINE_TRACK_TOP + videoTracks.length * (TIMELINE_TRACK_HEIGHT + TIMELINE_TRACK_GAP) + TIMELINE_TEXT_TRACK_HEIGHT + 24;
+  const audioTracks = useMemo(() => getAudioTracksTopFirst(present), [present.tracks]);
+  const videoTracksHeight = videoTracks.length * (TIMELINE_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
+  const audioTracksHeight = audioTracks.length * (TIMELINE_AUDIO_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
+  const audioTracksTop = TIMELINE_TRACK_TOP + videoTracksHeight;
+  const textTrackTop = audioTracksTop + audioTracksHeight;
+  const timelineContentHeight = textTrackTop + TIMELINE_TEXT_TRACK_HEIGHT + 24;
   const timelineWidth = Math.max(
     TIMELINE_MIN_WIDTH,
     getVirtualTimelineWidth(Math.ceil(duration || 1), timelineZoom),
@@ -516,19 +615,10 @@ function EditorWorkspace({
   });
   const virtualThumbnails = clipVirtualizer.getVirtualItems();
   const editArray = useMemo(
-    () => (showEditArray ? createEditArrayFromRuntime(present, projectSettings, projectName) : null),
-    [present, projectName, projectSettings, showEditArray],
+    () => (showProjectSettings ? createEditArrayFromRuntime(present, projectSettings, projectName) : null),
+    [present, projectName, projectSettings, showProjectSettings],
   );
   const editArrayText = useMemo(() => (editArray ? stringifyEditArray(editArray) : ''), [editArray]);
-  const compiledEditPlan = useMemo(() => (editArray ? compileEditArrayProgram(editArray) : null), [editArray]);
-  const visualReview = useMemo(
-    () => (compiledEditPlan ? createVisualReviewReport(compiledEditPlan.ir, projectSettings) : null),
-    [compiledEditPlan, projectSettings],
-  );
-  const repairPlan = useMemo(
-    () => (visualReview ? createEditRepairPlan(visualReview) : { patches: [] }),
-    [visualReview],
-  );
   const [viewerSize, setViewerSize] = useState({ height: 0, width: 0 });
   const previewFrameStyle = useMemo(() => {
     const mediaWidth = Math.max(1, activeAsset?.width || projectSettings.width || 16);
@@ -561,7 +651,7 @@ function EditorWorkspace({
   const { isGpuPreviewActive } = usePreviewCompositor({
     canvasRef: previewCanvasRef,
     effects: activeEffectSettings,
-    enabled: hasTimeline && activeEffects,
+    enabled: hasTimeline && activeEffects && activePrimaryKind === 'video',
     videoRef,
   });
 
@@ -575,15 +665,15 @@ function EditorWorkspace({
   );
 
   const getCurrentTimelineTime = useCallback(() => {
-    const video = videoRef.current;
+    const media = getActiveMediaElement();
     const active = activePlaybackRef.current;
 
-    if (!video || !active) {
+    if (!media || !active) {
       return playhead;
     }
 
-    return clamp(active.clipStart + (video.currentTime - active.sourceIn), 0, duration || 0);
-  }, [duration, playhead]);
+    return clamp(active.clipStart + (media.currentTime - active.sourceIn), 0, duration || 0);
+  }, [duration, getActiveMediaElement, playhead]);
 
   const { applyVisualTime, getVisualTime, markSeekEnd, playheadRef, progressRef, seekTo } = useTimelineRuntime({
     duration,
@@ -591,7 +681,7 @@ function EditorWorkspace({
     hasMedia: hasTimeline,
     inPoint: 0,
     isPlaying,
-    loopRange,
+    loopRange: false,
     outPoint: duration,
     pixelOffset: TIMELINE_LABEL_WIDTH,
     pixelsPerSecond: timelinePixelsPerSecond,
@@ -599,7 +689,7 @@ function EditorWorkspace({
     setIsPlaying,
     setPlayhead,
     timelineTimeToVideoTime,
-    videoRef,
+    videoRef: activeMediaRef,
   });
 
   const projectStatus = useMemo(() => {
@@ -673,20 +763,26 @@ function EditorWorkspace({
 
   const loadFiles = useCallback((files: FileList | File[]) => {
     const incomingFiles = Array.from(files);
-    const videoFiles = incomingFiles.filter(isSupportedVideoFile);
-    const unsupportedCount = incomingFiles.length - videoFiles.length;
+    const mediaFiles = incomingFiles.filter(isSupportedMediaFile);
+    const unsupportedCount = incomingFiles.length - mediaFiles.length;
+
+    if (incomingFiles.length === 0) {
+      setImportNotice(null);
+      return;
+    }
+
+    if (mediaFiles.length === 0) {
+      setImportNotice('No supported video or audio files in the selection.');
+      return;
+    }
 
     if (unsupportedCount > 0) {
-      setImportNotice(`${unsupportedCount} unsupported file${unsupportedCount === 1 ? '' : 's'} skipped. Video files are supported in this build.`);
+      setImportNotice(`${unsupportedCount} unsupported file${unsupportedCount === 1 ? '' : 's'} skipped. Video and audio files are supported.`);
     } else {
       setImportNotice(null);
     }
 
-    if (videoFiles.length === 0) {
-      return;
-    }
-
-    const assets = videoFiles.map(createAsset);
+    const assets = mediaFiles.map(createAsset);
     assets.forEach((asset) => registerObjectUrl(asset.originalUrl));
     setSaveStatus('saving');
     void Promise.all(assets.map((asset) => storeRuntimeAssetBlobs(record.id, asset)))
@@ -711,11 +807,42 @@ function EditorWorkspace({
       return;
     }
 
+    let resolvedTrackId = trackId;
+
+    if (!resolvedTrackId) {
+      if (asset.kind === 'audio') {
+        const existingAudioTrack = getDefaultAudioTrackId(present);
+        if (existingAudioTrack) {
+          resolvedTrackId = existingAudioTrack;
+        } else {
+          const newTrack: TimelineTrack = {
+            id: createId('audio'),
+            index: getNextTrackIndex(present, 'audio'),
+            kind: 'audio',
+            locked: false,
+            muted: false,
+            name: `Audio ${getNextTrackIndex(present, 'audio') + 1}`,
+            visible: true,
+          };
+          dispatch({ track: newTrack, type: 'ADD_TRACK' });
+          resolvedTrackId = newTrack.id;
+        }
+      } else {
+        resolvedTrackId = present.selectedTrackId ?? getDefaultVideoTrackId(present);
+      }
+    } else {
+      const targetTrack = present.tracks.find((track) => track.id === resolvedTrackId);
+      if (targetTrack && targetTrack.kind !== asset.kind) {
+        setImportNotice(`Cannot place ${asset.kind} asset on a ${targetTrack.kind} track.`);
+        return;
+      }
+    }
+
     dispatch({
       assetId,
       clipId: createId('clip'),
       timelineStart,
-      trackId: trackId ?? present.selectedTrackId ?? getDefaultVideoTrackId(present),
+      trackId: resolvedTrackId,
       type: 'ADD_ASSET_TO_TIMELINE',
     });
   }, [present]);
@@ -779,23 +906,44 @@ function EditorWorkspace({
   );
 
   const getTimelineTrackIdFromClientY = useCallback(
-    (clientY: number) => {
+    (clientY: number, assetKind: 'audio' | 'video' = 'video') => {
       const rect = timelineRef.current?.getBoundingClientRect();
+      const fallbackId =
+        assetKind === 'audio'
+          ? getDefaultAudioTrackId(present) ?? present.selectedTrackId ?? getDefaultVideoTrackId(present)
+          : present.selectedTrackId ?? getDefaultVideoTrackId(present);
 
-      if (!rect || videoTracks.length === 0) {
-        return present.selectedTrackId ?? getDefaultVideoTrackId(present);
+      if (!rect) {
+        return fallbackId;
       }
 
       const y = clientY - rect.top;
+
+      if (assetKind === 'audio') {
+        if (audioTracks.length === 0) {
+          return fallbackId;
+        }
+        const audioIndex = clamp(
+          Math.floor((y - audioTracksTop) / (TIMELINE_AUDIO_TRACK_HEIGHT + TIMELINE_TRACK_GAP)),
+          0,
+          Math.max(0, audioTracks.length - 1),
+        );
+        return audioTracks[audioIndex]?.id ?? fallbackId;
+      }
+
+      if (videoTracks.length === 0) {
+        return fallbackId;
+      }
+
       const index = clamp(
         Math.floor((y - TIMELINE_TRACK_TOP) / (TIMELINE_TRACK_HEIGHT + TIMELINE_TRACK_GAP)),
         0,
         Math.max(0, videoTracks.length - 1),
       );
 
-      return videoTracks[index]?.id ?? present.selectedTrackId ?? getDefaultVideoTrackId(present);
+      return videoTracks[index]?.id ?? fallbackId;
     },
-    [present, videoTracks],
+    [audioTracks, audioTracksTop, present, videoTracks],
   );
 
   const addTextOverlay = useCallback(() => {
@@ -978,9 +1126,9 @@ function EditorWorkspace({
   }, []);
 
   const pausePlayback = useCallback(() => {
-    videoRef.current?.pause();
+    getActiveMediaElement()?.pause();
     setIsPlaying(false);
-  }, []);
+  }, [getActiveMediaElement]);
 
   const playPlayback = useCallback(async () => {
     if (!hasTimeline) {
@@ -1014,23 +1162,23 @@ function EditorWorkspace({
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     }
 
-    const video = videoRef.current;
+    const media = getActiveMediaElement();
 
-    if (!video) {
+    if (!media) {
       setIsPlaying(false);
       return;
     }
 
     try {
-      await waitForVideoMetadata(video);
-      seekVideoSafely(video, active.clip.sourceIn + active.localTime);
-      video.playbackRate = playbackRate;
-      await video.play();
+      await waitForVideoMetadata(media);
+      seekVideoSafely(media, active.clip.sourceIn + active.localTime);
+      media.playbackRate = playbackRate;
+      await media.play();
       setIsPlaying(true);
     } catch {
       setIsPlaying(false);
     }
-  }, [duration, hasTimeline, playbackRate, playhead, present]);
+  }, [duration, getActiveMediaElement, hasTimeline, playbackRate, playhead, present]);
 
   const togglePlayback = useCallback(() => {
     if (isPlaying) {
@@ -1133,89 +1281,6 @@ function EditorWorkspace({
     }
   }, [onProjectExport, onRecordSaved, present, projectName, projectSettings]);
 
-  const runCommand = useCallback(
-    (rawCommand: string) => {
-      const command = rawCommand.trim().toLowerCase();
-
-      if (!command) {
-        return;
-      }
-
-      const toggleProjectSettings = () => {
-        setShowProjectSettings((value) => {
-          const next = !value;
-          if (next) {
-            setShowEditArray(false);
-          }
-          return next;
-        });
-      };
-      const toggleEditArray = () => {
-        setShowEditArray((value) => {
-          const next = !value;
-          if (next) {
-            setShowProjectSettings(false);
-          }
-          return next;
-        });
-      };
-
-      const definitions: Array<{ phrase: string; aliases?: string[]; run: () => void }> = [
-        { phrase: 'new project', aliases: ['new'], run: onBackToDashboard },
-        { phrase: 'open dashboard', aliases: ['dashboard'], run: onBackToDashboard },
-        {
-          phrase: 'rename project',
-          aliases: ['rename'],
-          run: () => {
-            projectNameInputRef.current?.focus();
-            projectNameInputRef.current?.select();
-          },
-        },
-        { phrase: 'export project', run: () => void exportCurrentProjectPackage() },
-        { phrase: 'project settings', aliases: ['settings'], run: toggleProjectSettings },
-        { phrase: 'edit array', aliases: ['eal'], run: toggleEditArray },
-        { phrase: 'import folder', aliases: ['folder'], run: openFolderImport },
-        { phrase: 'import', run: () => fileInputRef.current?.click() },
-        { phrase: 'add to timeline', aliases: ['add'], run: () => addAssetToTimeline(present.selectedAssetId) },
-        {
-          phrase: 'delete asset',
-          run: () => {
-            if (present.selectedAssetId) {
-              deleteAssetFromLibrary(present.selectedAssetId);
-            }
-          },
-        },
-        { phrase: 'split', run: splitAtPlayhead },
-        { phrase: 'delete', run: deleteSelected },
-        { phrase: 'add text', aliases: ['text'], run: addTextOverlay },
-        { phrase: 'export', run: () => void exportProject() },
-        { phrase: 'undo', run: () => dispatch({ type: 'UNDO' }) },
-        { phrase: 'redo', run: () => dispatch({ type: 'REDO' }) },
-      ];
-
-      const resolved = resolveCommand(command, definitions);
-
-      if (resolved.kind === 'match') {
-        resolved.definition.run();
-      } else if (resolved.kind === 'ambiguous') {
-        setImportNotice(`Ambiguous command "${command}". Type more characters to disambiguate.`);
-      }
-
-      setCommandQuery('');
-    },
-    [
-      addAssetToTimeline,
-      addTextOverlay,
-      deleteAssetFromLibrary,
-      deleteSelected,
-      exportProject,
-      onBackToDashboard,
-      exportCurrentProjectPackage,
-      present.selectedAssetId,
-      openFolderImport,
-      splitAtPlayhead,
-    ],
-  );
 
   const updateFromPointer = useCallback(
     (event: PointerEvent<HTMLDivElement>, mode: DragMode = dragModeRef.current) => {
@@ -1233,18 +1298,21 @@ function EditorWorkspace({
         if (now - lastScrubPreviewSeekAtRef.current > SCRUB_PREVIEW_SEEK_INTERVAL_MS) {
           lastScrubPreviewSeekAtRef.current = now;
           const videoTime = timelineTimeToVideoTime(time);
-          if (videoRef.current && videoTime !== null) {
-            seekVideoSafely(videoRef.current, videoTime);
+          const media = getActiveMediaElement();
+          if (media && videoTime !== null) {
+            seekVideoSafely(media, videoTime);
           }
         }
       } else if (mode.type === 'clip-move') {
         if (isClipReorderDrag(mode.startX, mode.startY, event.clientX, event.clientY, CLIP_REORDER_DRAG_THRESHOLD_PX)) {
           const deltaSeconds = (event.clientX - mode.startX) / timelinePixelsPerSecond;
+          const startingTrack = present.tracks.find((track) => track.id === mode.startTrackId);
+          const dragKind: 'audio' | 'video' = startingTrack?.kind === 'audio' ? 'audio' : 'video';
           dispatch({
             clipId: mode.clipId,
             record: false,
             timelineStart: Math.max(0, mode.startTimelineStart + deltaSeconds),
-            trackId: getTimelineTrackIdFromClientY(event.clientY),
+            trackId: getTimelineTrackIdFromClientY(event.clientY, dragKind),
             type: 'MOVE_CLIP',
           });
         }
@@ -1442,10 +1510,12 @@ function EditorWorkspace({
         }
 
         const deltaSeconds = (event.clientX - mode.startX) / timelinePixelsPerSecond;
+        const startingTrack = present.tracks.find((track) => track.id === mode.startTrackId);
+        const dragKind: 'audio' | 'video' = startingTrack?.kind === 'audio' ? 'audio' : 'video';
         dispatch({
           clipId: mode.clipId,
           timelineStart: Math.max(0, mode.startTimelineStart + deltaSeconds),
-          trackId: getTimelineTrackIdFromClientY(event.clientY),
+          trackId: getTimelineTrackIdFromClientY(event.clientY, dragKind),
           type: 'MOVE_CLIP',
         });
       }
@@ -1520,8 +1590,10 @@ function EditorWorkspace({
       const assetId = event.dataTransfer.getData(ASSET_DRAG_TYPE);
 
       if (assetId) {
+        const asset = getAssetById(present, assetId);
+        const kind = asset?.kind ?? 'video';
         const time = getTimelineTimeFromClientX(event.clientX);
-        const trackId = getTimelineTrackIdFromClientY(event.clientY);
+        const trackId = getTimelineTrackIdFromClientY(event.clientY, kind);
         addAssetToTimeline(assetId, time, trackId);
         return;
       }
@@ -1530,24 +1602,24 @@ function EditorWorkspace({
         loadFiles(event.dataTransfer.files);
       }
     },
-    [addAssetToTimeline, getTimelineTimeFromClientX, getTimelineTrackIdFromClientY, loadFiles],
+    [addAssetToTimeline, getTimelineTimeFromClientX, getTimelineTrackIdFromClientY, loadFiles, present],
   );
 
   const onPreviewLoadedMetadata = useCallback(() => {
     const active = getClipAtTime(present, playhead);
-    const video = videoRef.current;
+    const media = getActiveMediaElement();
 
-    if (!active || !video) {
+    if (!active || !media) {
       return;
     }
 
-    seekVideoSafely(video, active.clip.sourceIn + active.localTime);
-    video.playbackRate = playbackRate;
+    seekVideoSafely(media, active.clip.sourceIn + active.localTime);
+    media.playbackRate = playbackRate;
 
     if (isPlaying) {
-      void video.play();
+      void media.play();
     }
-  }, [isPlaying, playbackRate, playhead, present]);
+  }, [getActiveMediaElement, isPlaying, playbackRate, playhead, present]);
 
   const onPreviewPlaybackError = useCallback(() => {
     if (!activeAsset || activeAsset.playbackUrl === activeAsset.originalUrl) {
@@ -1571,18 +1643,18 @@ function EditorWorkspace({
   }, [activeAsset]);
 
   const onPreviewTimeUpdate = useCallback(() => {
-    const video = videoRef.current;
+    const media = getActiveMediaElement();
     const active = activePlaybackRef.current;
 
-    if (!video || !active || !isPlaying) {
+    if (!media || !active || !isPlaying) {
       return;
     }
 
-    if (video.currentTime >= active.sourceOut - 0.025) {
+    if (media.currentTime >= active.sourceOut - 0.025) {
       const nextClip = getNextClipAfter(present, active.clipEnd);
 
       if (!nextClip || active.clipEnd >= duration - 0.025) {
-        video.pause();
+        media.pause();
         applyVisualTime(duration);
         setPlayhead(duration);
         setIsPlaying(false);
@@ -1594,7 +1666,7 @@ function EditorWorkspace({
       applyVisualTime(nextTime);
       setPlayhead(nextTime);
     }
-  }, [applyVisualTime, duration, isPlaying, present]);
+  }, [applyVisualTime, duration, getActiveMediaElement, isPlaying, present]);
 
   const onFileInputChange = useCallback(
     (event: ChangeEvent<HTMLInputElement>) => {
@@ -1694,16 +1766,16 @@ function EditorWorkspace({
   }, [activeTimeline]);
 
   useEffect(() => {
-    const video = videoRef.current;
+    const media = getActiveMediaElement();
 
-    if (!video || !activeTimeline) {
+    if (!media || !activeTimeline) {
       return;
     }
 
-    video.volume = activeTimeline.clip.muted ? 0 : clamp(activeTimeline.clip.volume, 0, 1);
-    video.muted = activeTimeline.clip.muted;
-    video.playbackRate = playbackRate;
-  }, [activeTimeline, playbackRate]);
+    media.volume = activeTimeline.clip.muted ? 0 : clamp(activeTimeline.clip.volume, 0, 1);
+    media.muted = activeTimeline.clip.muted;
+    media.playbackRate = playbackRate;
+  }, [activeTimeline, getActiveMediaElement, playbackRate]);
 
   useEffect(() => {
     audioMeterGainRef.current = {
@@ -1713,9 +1785,9 @@ function EditorWorkspace({
   }, [activeTimeline?.clip.muted, activeTimeline?.clip.volume]);
 
   useEffect(() => {
-    const video = videoRef.current;
+    const media = getActiveMediaElement();
 
-    if (!video || !activeAsset) {
+    if (!media || !activeAsset) {
       audioAnalyserRef.current = null;
       audioMeterDataRef.current = null;
       paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
@@ -1739,10 +1811,10 @@ function EditorWorkspace({
     analyser.fftSize = 1024;
     analyser.smoothingTimeConstant = 0.82;
 
-    let source = mediaElementAudioSources.get(video);
+    let source = mediaElementAudioSources.get(media);
     if (!source) {
-      source = context.createMediaElementSource(video);
-      mediaElementAudioSources.set(video, source);
+      source = context.createMediaElementSource(media);
+      mediaElementAudioSources.set(media, source);
     }
 
     try {
@@ -1776,7 +1848,7 @@ function EditorWorkspace({
 
       paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
     };
-  }, [activeAsset?.playbackUrl, paintAudioMeter]);
+  }, [activeAsset?.playbackUrl, getActiveMediaElement, paintAudioMeter]);
 
   useEffect(() => {
     let animationFrame = 0;
@@ -1839,28 +1911,28 @@ function EditorWorkspace({
   }, [activeAsset?.playbackUrl, isPlaying, paintAudioMeter]);
 
   useEffect(() => {
-    const video = videoRef.current;
+    const media = getActiveMediaElement();
     const previousClipId = previousActiveClipIdRef.current;
     const nextClipId = activeTimeline?.clip.id ?? null;
     const clipChanged = previousClipId !== nextClipId;
     previousActiveClipIdRef.current = nextClipId;
 
-    if (!video || !activeTimeline || !activeAsset) {
+    if (!media || !activeTimeline || !activeAsset) {
       return;
     }
 
     if (!isPlaying || clipChanged) {
       const targetTime = activeTimeline.clip.sourceIn + activeTimeline.localTime;
 
-      if (Math.abs(video.currentTime - targetTime) > 0.05) {
-        seekVideoSafely(video, targetTime);
+      if (Math.abs(media.currentTime - targetTime) > 0.05) {
+        seekVideoSafely(media, targetTime);
       }
     }
 
     if (isPlaying && clipChanged) {
-      void video.play();
+      void media.play();
     }
-  }, [activeAsset, activeTimeline, isPlaying]);
+  }, [activeAsset, activeTimeline, getActiveMediaElement, isPlaying]);
 
   useEffect(() => {
     setPlayhead((current) => clamp(current, 0, duration || 0));
@@ -1937,7 +2009,8 @@ function EditorWorkspace({
       }
 
       metadataJobsRef.current.add(asset.id);
-      loadVideoMetadata(asset.originalUrl)
+      const loader = asset.kind === 'audio' ? loadAudioMetadata : loadVideoMetadata;
+      loader(asset.originalUrl)
         .then(async (metadata) => {
           if (metadata.posterUrl) {
             registerObjectUrl(metadata.posterUrl);
@@ -1982,6 +2055,7 @@ function EditorWorkspace({
 
     const nextAsset = present.assets.find(
       (asset) =>
+        asset.kind === 'video' &&
         asset.duration > 0 &&
         shouldUsePreviewProxy(asset.file, asset.width, asset.height) &&
         asset.proxyStatus.state === 'idle' &&
@@ -2113,8 +2187,8 @@ function EditorWorkspace({
       onKeyDown={onAppKeyDown}
       tabIndex={-1}
     >
-      <input className="file-input" multiple onChange={onFileInputChange} ref={fileInputRef} type="file" accept="video/*" />
-      <input className="file-input" multiple onChange={onFileInputChange} ref={folderInputRef} type="file" />
+      <input className="file-input" multiple onChange={onFileInputChange} ref={fileInputRef} type="file" />
+      <input className="file-input" onChange={onFileInputChange} ref={folderInputRef} type="file" />
 
       <header className="topbar">
         <div className="brand-lockup">
@@ -2135,22 +2209,6 @@ function EditorWorkspace({
           </div>
         </div>
 
-        <form
-          className="command-shell"
-          onSubmit={(event) => {
-            event.preventDefault();
-            runCommand(commandQuery);
-          }}
-        >
-          <Search size={14} />
-          <input
-            onChange={(event) => setCommandQuery(event.target.value)}
-            placeholder="Commands: import, import folder, add, split, delete, delete asset, text, export"
-            value={commandQuery}
-          />
-          <span>Enter</span>
-        </form>
-
         <div className="project-state">
           <strong>{projectStatus.label}</strong>
           <span>{saveStatus === 'saving' ? 'Saving' : saveStatus === 'failed' ? 'Save failed' : 'Saved'} | {projectStatus.detail}</span>
@@ -2159,47 +2217,15 @@ function EditorWorkspace({
         <div className="topbar-actions">
           <button
             className="icon-button"
-            onClick={() => {
-              setShowProjectSettings((value) => {
-                const next = !value;
-                if (next) {
-                  setShowEditArray(false);
-                }
-                return next;
-              });
-            }}
+            onClick={() => setShowProjectSettings((value) => !value)}
             title="Project settings"
             type="button"
           >
             <Settings size={15} />
           </button>
-          <button
-            className={`icon-button${showEditArray ? ' is-active' : ''}`}
-            onClick={() => {
-              setShowEditArray((value) => {
-                const next = !value;
-                if (next) {
-                  setShowProjectSettings(false);
-                }
-                return next;
-              });
-            }}
-            title="Edit Array Language"
-            type="button"
-          >
-            <Code2 size={15} />
-          </button>
           <button className="button secondary" onClick={() => void exportCurrentProjectPackage()} type="button">
             <FileArchive size={15} />
             Project
-          </button>
-          <button className="button secondary" onClick={() => fileInputRef.current?.click()} type="button">
-            <Upload size={15} />
-            Import
-          </button>
-          <button className="button secondary" onClick={openFolderImport} type="button">
-            <FolderOpen size={15} />
-            Folder
           </button>
           {exportStatus.state === 'running' ? (
             <button className="button secondary" onClick={cancelExport} type="button">
@@ -2217,20 +2243,10 @@ function EditorWorkspace({
 
       {showProjectSettings ? (
         <ProjectSettingsPanel
+          editArrayText={editArrayText}
           onClose={() => setShowProjectSettings(false)}
           onSettingsChange={setProjectSettings}
           settings={projectSettings}
-        />
-      ) : null}
-
-      {showEditArray ? (
-        <EditArrayPanel
-          diagnostics={compiledEditPlan?.diagnostics.length ?? 0}
-          editArrayText={editArrayText}
-          operations={compiledEditPlan?.operations.length ?? 0}
-          onClose={() => setShowEditArray(false)}
-          repairPatches={repairPlan.patches.length}
-          reviewIssues={visualReview?.issues.length ?? 0}
         />
       ) : null}
 
@@ -2285,7 +2301,13 @@ function EditorWorkspace({
                     type="button"
                   >
                     <span className="asset-poster">
-                      {asset.posterUrl ? <img alt="" src={asset.posterUrl} /> : <Film size={18} />}
+                      {asset.posterUrl ? (
+                        <img alt="" src={asset.posterUrl} />
+                      ) : asset.kind === 'audio' ? (
+                        <Music size={18} />
+                      ) : (
+                        <Film size={18} />
+                      )}
                     </span>
                     <span>
                       <strong>{asset.name}</strong>
@@ -2361,25 +2383,61 @@ function EditorWorkspace({
                       />
                     ) : null;
                   })}
-                <video
-                  className={isGpuPreviewActive ? 'is-composited' : undefined}
-                  key={activeAsset.playbackUrl}
-                  onError={onPreviewPlaybackError}
-                  onLoadedMetadata={onPreviewLoadedMetadata}
-                  onSeeked={markSeekEnd}
-                  onTimeUpdate={onPreviewTimeUpdate}
-                  playsInline
-                  preload="auto"
-                  ref={videoRef}
-                  src={activeAsset.playbackUrl}
-                  style={activeClipTransformStyle}
-                />
+                {activeAudioLayerTimelines
+                  .filter((timeline) => !(activePrimaryKind === 'audio' && timeline.clip.id === activeTimeline?.clip.id))
+                  .map((timeline) => {
+                    const layerAsset = getClipAsset(present, timeline.clip);
+
+                    return layerAsset ? (
+                      <PreviewLayerAudio
+                        asset={layerAsset}
+                        clip={timeline.clip}
+                        isPlaying={isPlaying}
+                        key={timeline.clip.id}
+                        localTime={timeline.localTime}
+                        playbackRate={playbackRate}
+                      />
+                    ) : null;
+                  })}
+                {activeAsset.kind === 'video' ? (
+                  <video
+                    className={isGpuPreviewActive ? 'is-composited' : undefined}
+                    key={activeAsset.playbackUrl}
+                    onError={onPreviewPlaybackError}
+                    onLoadedMetadata={onPreviewLoadedMetadata}
+                    onSeeked={markSeekEnd}
+                    onTimeUpdate={onPreviewTimeUpdate}
+                    playsInline
+                    preload="auto"
+                    ref={attachVideoRef}
+                    src={activeAsset.playbackUrl}
+                    style={activeClipTransformStyle}
+                  />
+                ) : (
+                  <>
+                    <div className="audio-only-stage" aria-hidden="true">
+                      <Music size={42} />
+                      <strong>{activeAsset.name}</strong>
+                      <span>Audio only</span>
+                    </div>
+                    <audio
+                      key={activeAsset.playbackUrl}
+                      onError={onPreviewPlaybackError}
+                      onLoadedMetadata={onPreviewLoadedMetadata}
+                      onSeeked={markSeekEnd}
+                      onTimeUpdate={onPreviewTimeUpdate}
+                      preload="auto"
+                      ref={attachAudioPrimaryRef}
+                      src={activeAsset.playbackUrl}
+                    />
+                  </>
+                )}
                 <canvas
                   className={`gpu-canvas${isGpuPreviewActive ? ' is-active' : ''}`}
                   ref={previewCanvasRef}
                   style={activeClipTransformStyle}
                 />
-                {activeClip ? (
+                {activeClip && activePrimaryKind === 'video' ? (
                   <button
                     aria-label="Move selected clip on canvas"
                     className={`clip-transform-box${activeClip.id === present.selectedClipId ? ' is-selected' : ''}`}
@@ -2460,28 +2518,51 @@ function EditorWorkspace({
                   <option value={2}>2x</option>
                 </select>
               </label>
-              <button className={`icon-button${loopRange ? ' is-active' : ''}`} onClick={() => setLoopRange((value) => !value)} title="Loop timeline" type="button">
-                <RotateCcw size={16} />
-              </button>
             </div>
           </div>
         </section>
 
-        <aside className="panel inspector">
-          <Inspector
-            addAssetToTimeline={() => addAssetToTimeline(selectedAsset?.id ?? null)}
-            capabilities={capabilities}
-            deleteSelected={deleteSelected}
-            deleteAssetFromLibrary={deleteAssetFromLibrary}
-            dispatch={dispatch}
-            hasTimeline={hasTimeline}
-            project={present}
-            selectedAsset={selectedAsset}
-            selectedClip={selectedClip}
-            selectedClipAsset={selectedClipAsset}
-            selectedText={selectedText}
-            splitAtPlayhead={splitAtPlayhead}
-          />
+        <aside className="panel right-panel">
+          <div className="right-panel-tabs" role="tablist">
+            <button
+              aria-selected={rightPanelTab === 'inspector'}
+              className={`right-panel-tab${rightPanelTab === 'inspector' ? ' is-active' : ''}`}
+              onClick={() => setRightPanelTab('inspector')}
+              role="tab"
+              type="button"
+            >
+              Inspector
+            </button>
+            <button
+              aria-selected={rightPanelTab === 'chat'}
+              className={`right-panel-tab${rightPanelTab === 'chat' ? ' is-active' : ''}`}
+              onClick={() => setRightPanelTab('chat')}
+              role="tab"
+              type="button"
+            >
+              Chat
+            </button>
+          </div>
+          <div className="right-panel-body">
+            {rightPanelTab === 'inspector' ? (
+              <Inspector
+                addAssetToTimeline={() => addAssetToTimeline(selectedAsset?.id ?? null)}
+                capabilities={capabilities}
+                deleteSelected={deleteSelected}
+                deleteAssetFromLibrary={deleteAssetFromLibrary}
+                dispatch={dispatch}
+                hasTimeline={hasTimeline}
+                project={present}
+                selectedAsset={selectedAsset}
+                selectedClip={selectedClip}
+                selectedClipAsset={selectedClipAsset}
+                selectedText={selectedText}
+                splitAtPlayhead={splitAtPlayhead}
+              />
+            ) : (
+              <ChatPanel />
+            )}
+          </div>
         </aside>
       </main>
 
@@ -2539,10 +2620,24 @@ function EditorWorkspace({
             >
             <div className="timeline-ruler">
               <div className="timeline-track-actions">
-                <button aria-label="Add video track" className="icon-button small" onClick={addVideoTrack} title="Add video track" type="button">
+                <button
+                  aria-label="Add video track"
+                  className="icon-button small"
+                  onClick={addVideoTrack}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  title="Add video track"
+                  type="button"
+                >
                   <Film size={14} />
                 </button>
-                <button aria-label="Add audio track" className="icon-button small" onClick={addAudioTrack} title="Add audio track" type="button">
+                <button
+                  aria-label="Add audio track"
+                  className="icon-button small"
+                  onClick={addAudioTrack}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  title="Add audio track"
+                  type="button"
+                >
                   <Volume2 size={14} />
                 </button>
               </div>
@@ -2640,9 +2735,84 @@ function EditorWorkspace({
               );
             })}
 
+            {audioTracks.map((track, index) => {
+              const top = audioTracksTop + index * (TIMELINE_AUDIO_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
+              const trackClips = present.clips.filter((clip) => clip.trackId === track.id);
+
+              return (
+                <div
+                  className={`audio-track timeline-track-row${track.id === present.selectedTrackId ? ' is-selected' : ''}`}
+                  data-track-id={track.id}
+                  key={track.id}
+                  onPointerDown={(event) => {
+                    if (event.target === event.currentTarget) {
+                      dispatch({ trackId: track.id, type: 'SELECT_TRACK' });
+                    }
+                  }}
+                  style={{ top: `${top}px`, height: `${TIMELINE_AUDIO_TRACK_HEIGHT}px` }}
+                >
+                  <div className="track-label-shell">
+                    <button
+                      className="track-label"
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        dispatch({ trackId: track.id, type: 'SELECT_TRACK' });
+                      }}
+                      type="button"
+                    >
+                      <strong>{track.name}</strong>
+                      <span>{track.muted ? 'Muted' : 'Audible'}</span>
+                    </button>
+                    <button
+                      aria-label={`Delete ${track.name}`}
+                      className="track-delete"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        deleteTrack(track.id);
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      title="Delete track"
+                      type="button"
+                    >
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
+                  {trackClips.map((clip) => {
+                    const asset = getClipAsset(present, clip);
+                    const clipDuration = getClipDuration(clip);
+                    const left = TIMELINE_LABEL_WIDTH + clip.timelineStart * timelinePixelsPerSecond;
+                    const width = Math.max(70, clipDuration * timelinePixelsPerSecond);
+
+                    return (
+                      <button
+                        className={`timeline-clip timeline-clip-audio${clip.id === present.selectedClipId ? ' is-selected' : ''}`}
+                        key={clip.id}
+                        onPointerDown={(event) => onClipPointerDown(event, clip.id)}
+                        style={{ left: `${left}px`, width: `${width}px` }}
+                        type="button"
+                      >
+                        <span className="trim-handle left" onPointerDown={(event) => onTrimPointerDown(event, clip.id, 'start')} />
+                        <span className="audio-clip-glyph">
+                          <Music size={14} />
+                        </span>
+                        <span className="clip-label">
+                          <strong>{asset?.name ?? 'Missing audio'}</strong>
+                          <small>
+                            {formatClock(clip.timelineStart)} | {formatClock(clip.sourceIn)} - {formatClock(clip.sourceOut)}
+                          </small>
+                        </span>
+                        <span className="clip-audio">{clip.muted ? <VolumeX size={14} /> : <Volume2 size={14} />}</span>
+                        <span className="trim-handle right" onPointerDown={(event) => onTrimPointerDown(event, clip.id, 'end')} />
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+
             <div
               className="text-track"
-              style={{ top: `${TIMELINE_TRACK_TOP + videoTracks.length * (TIMELINE_TRACK_HEIGHT + TIMELINE_TRACK_GAP)}px` }}
+              style={{ top: `${textTrackTop}px` }}
             >
               <div className="track-label text-label">
                 <strong>Text</strong>
@@ -3090,71 +3260,15 @@ function ProjectDashboard({
 }
 
 type ProjectSettingsPanelProps = {
+  editArrayText: string;
   onClose: () => void;
   onSettingsChange: (settings: ProjectSettings) => void;
   settings: ProjectSettings;
 };
 
-type EditArrayPanelProps = {
-  diagnostics: number;
-  editArrayText: string;
-  operations: number;
-  onClose: () => void;
-  repairPatches: number;
-  reviewIssues: number;
-};
-
-function EditArrayPanel({ diagnostics, editArrayText, operations, onClose, repairPatches, reviewIssues }: EditArrayPanelProps) {
+function ProjectSettingsPanel({ editArrayText, onClose, onSettingsChange, settings }: ProjectSettingsPanelProps) {
   const [copyState, setCopyState] = useState<'copied' | 'idle'>('idle');
 
-  return (
-    <aside className="edit-array-panel">
-      <div className="panel-header">
-        <div>
-          <h2>Edit Array Language</h2>
-          <span>DSL to IR to runtime operations.</span>
-        </div>
-        <button className="icon-button small" onClick={onClose} type="button">
-          <X size={15} />
-        </button>
-      </div>
-      <div className="eal-stats">
-        <div>
-          <strong>{operations}</strong>
-          <span>Ops</span>
-        </div>
-        <div>
-          <strong>{diagnostics}</strong>
-          <span>IR notes</span>
-        </div>
-        <div>
-          <strong>{reviewIssues}</strong>
-          <span>Review</span>
-        </div>
-        <div>
-          <strong>{repairPatches}</strong>
-          <span>Repairs</span>
-        </div>
-      </div>
-      <textarea readOnly spellCheck={false} value={editArrayText} />
-      <button
-        className="button secondary full-width"
-        onClick={() => {
-          void navigator.clipboard.writeText(editArrayText).then(() => {
-            setCopyState('copied');
-            window.setTimeout(() => setCopyState('idle'), 1400);
-          });
-        }}
-        type="button"
-      >
-        <Copy size={15} />
-        {copyState === 'copied' ? 'Copied' : 'Copy Edit Array'}
-      </button>
-    </aside>
-  );
-}
-
-function ProjectSettingsPanel({ onClose, onSettingsChange, settings }: ProjectSettingsPanelProps) {
   return (
     <aside className="settings-popover">
       <div className="panel-header">
@@ -3181,6 +3295,26 @@ function ProjectSettingsPanel({ onClose, onSettingsChange, settings }: ProjectSe
         <span>Audio</span>
         <strong>{settings.sampleRate} Hz</strong>
       </div>
+
+      <div className="settings-divider" />
+      <div className="settings-section-header">
+        <strong>Edit Array Language</strong>
+        <span>Live serialization of this project.</span>
+      </div>
+      <textarea className="edit-array-textarea" readOnly spellCheck={false} value={editArrayText} />
+      <button
+        className="button secondary full-width"
+        onClick={() => {
+          void navigator.clipboard.writeText(editArrayText).then(() => {
+            setCopyState('copied');
+            window.setTimeout(() => setCopyState('idle'), 1400);
+          });
+        }}
+        type="button"
+      >
+        <Copy size={15} />
+        {copyState === 'copied' ? 'Copied' : 'Copy Edit Array'}
+      </button>
     </aside>
   );
 }
@@ -3265,15 +3399,18 @@ function Inspector({
 
   if (selectedClip) {
     const clipDuration = getClipDuration(selectedClip);
+    const selectedClipTrack = getTrackById(project, selectedClip.trackId);
+    const isAudioClip = selectedClipTrack?.kind === 'audio' || selectedClipAsset?.kind === 'audio';
+    const trackOptions = isAudioClip ? getAudioTracksTopFirst(project) : getVideoTracksTopFirst(project);
 
     return (
       <>
         <div className="panel-header">
           <div>
-            <h2>Clip</h2>
+            <h2>{isAudioClip ? 'Audio Clip' : 'Clip'}</h2>
             <span>{selectedClipAsset?.name ?? 'Missing asset'}</span>
           </div>
-          <Scissors size={16} />
+          {isAudioClip ? <Music size={16} /> : <Scissors size={16} />}
         </div>
         <div className="control-stack">
           <div className="meta-grid">
@@ -3299,7 +3436,7 @@ function Inspector({
               onChange={(event) => dispatch({ clipId: selectedClip.id, trackId: event.target.value, type: 'MOVE_CLIP' })}
               value={selectedClip.trackId}
             >
-              {getVideoTracksTopFirst(project).map((track) => (
+              {trackOptions.map((track) => (
                 <option key={track.id} value={track.id}>
                   {track.name}
                 </option>
@@ -3324,10 +3461,14 @@ function Inspector({
             onChange={(value) => dispatch({ clipId: selectedClip.id, edge: 'end', sourceTime: value, type: 'TRIM_CLIP' })}
           />
 
-          <div className="subhead">Canvas Transform</div>
-          <ControlNumber label="X" max={1} min={0} step={0.01} value={selectedClip.transform.x} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { x: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
-          <ControlNumber label="Y" max={1} min={0} step={0.01} value={selectedClip.transform.y} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { y: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
-          <ControlNumber label="Scale" max={4} min={0.25} step={0.01} value={selectedClip.transform.scale} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { scale: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+          {isAudioClip ? null : (
+            <>
+              <div className="subhead">Canvas Transform</div>
+              <ControlNumber label="X" max={1} min={0} step={0.01} value={selectedClip.transform.x} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { x: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+              <ControlNumber label="Y" max={1} min={0} step={0.01} value={selectedClip.transform.y} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { y: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+              <ControlNumber label="Scale" max={4} min={0.25} step={0.01} value={selectedClip.transform.scale} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { scale: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+            </>
+          )}
 
           <label className="toggle-row">
             <input
@@ -3341,10 +3482,14 @@ function Inspector({
           <ControlNumber label="Fade In" max={clipDuration} min={0} step={0.05} value={selectedClip.fadeIn} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { fadeIn: value }, type: 'UPDATE_CLIP_AUDIO' })} />
           <ControlNumber label="Fade Out" max={clipDuration} min={0} step={0.05} value={selectedClip.fadeOut} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { fadeOut: value }, type: 'UPDATE_CLIP_AUDIO' })} />
 
-          <div className="subhead">Effects</div>
-          <ControlNumber label="Brightness" max={0.4} min={-0.4} step={0.01} value={selectedClip.effects.brightness} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { brightness: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
-          <ControlNumber label="Contrast" max={1.8} min={0.5} step={0.01} value={selectedClip.effects.contrast} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { contrast: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
-          <ControlNumber label="Saturation" max={2} min={0} step={0.01} value={selectedClip.effects.saturation} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { saturation: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
+          {isAudioClip ? null : (
+            <>
+              <div className="subhead">Effects</div>
+              <ControlNumber label="Brightness" max={0.4} min={-0.4} step={0.01} value={selectedClip.effects.brightness} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { brightness: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
+              <ControlNumber label="Contrast" max={1.8} min={0.5} step={0.01} value={selectedClip.effects.contrast} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { contrast: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
+              <ControlNumber label="Saturation" max={2} min={0} step={0.01} value={selectedClip.effects.saturation} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { saturation: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
+            </>
+          )}
 
           <div className="button-grid">
             <button

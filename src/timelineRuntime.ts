@@ -1,7 +1,7 @@
 import { MutableRefObject, useCallback, useEffect, useRef } from 'react';
 import { performanceMonitor } from './performanceMonitor';
 
-type VideoElementWithFrameCallback = HTMLVideoElement & {
+type MediaElementWithFrameCallback = HTMLMediaElement & {
   requestVideoFrameCallback?: (callback: VideoFrameRequestCallback) => number;
   cancelVideoFrameCallback?: (handle: number) => void;
 };
@@ -20,7 +20,7 @@ export type TimelineRuntimeOptions = {
   setIsPlaying: (isPlaying: boolean) => void;
   setPlayhead: (time: number | ((previous: number) => number)) => void;
   timelineTimeToVideoTime?: (time: number) => number | null;
-  videoRef: MutableRefObject<HTMLVideoElement | null>;
+  videoRef: MutableRefObject<HTMLMediaElement | null>;
 };
 
 export function useTimelineRuntime({
@@ -87,7 +87,7 @@ export function useTimelineRuntime({
       rafRef.current = null;
     }
 
-    const video = videoRef.current as VideoElementWithFrameCallback | null;
+    const video = videoRef.current as MediaElementWithFrameCallback | null;
 
     if (videoFrameRef.current !== null && video?.cancelVideoFrameCallback) {
       video.cancelVideoFrameCallback(videoFrameRef.current);
@@ -153,7 +153,7 @@ export function useTimelineRuntime({
       return;
     }
 
-    const video = videoRef.current as VideoElementWithFrameCallback | null;
+    const video = videoRef.current as MediaElementWithFrameCallback | null;
 
     if (!video) {
       return;

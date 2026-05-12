@@ -21,6 +21,7 @@ function runtimeProject(): ProjectPresent {
         file,
         height: 1080,
         id: 'asset-a',
+        kind: 'video',
         name: 'clip.mp4',
         originalUrl: 'blob:runtime-original',
         playbackUrl: 'blob:runtime-playback',

@@ -46,11 +46,11 @@ export const EDIT_ARRAY_SYSTEM_COMPONENTS = [
 
 export const EDIT_ARRAY_FIELD_POLICY = {
   PersistedAsset: {
-    covered: ['id', 'name', 'type', 'size', 'duration', 'width', 'height', 'fingerprint', 'mediaKey', 'posterKey'],
+    covered: ['id', 'name', 'kind', 'type', 'size', 'duration', 'width', 'height', 'fingerprint', 'mediaKey', 'posterKey'],
     omitted: [],
   },
   ProjectAsset: {
-    covered: ['id', 'name', 'type', 'size', 'duration', 'width', 'height'],
+    covered: ['id', 'name', 'kind', 'type', 'size', 'duration', 'width', 'height'],
     omitted: ['file', 'originalUrl', 'playbackUrl', 'posterUrl', 'proxyStatus', 'proxyUrl'],
   },
   ProjectPresent: {
@@ -87,13 +87,14 @@ export type EditArrayInstruction =
   | ['export_settings', { fps: number; height: number; sampleRate: 48000; width: number }]
   | [
       'import',
-      'video',
+      'audio' | 'video',
       string,
       {
         duration: string;
         fingerprint?: string;
         height: number;
         id: string;
+        kind: 'audio' | 'video';
         mediaKey?: string;
         posterKey?: string | null;
         seconds: number;
@@ -144,6 +145,7 @@ type EditArrayAsset = {
   fingerprint?: string;
   height: number;
   id: string;
+  kind?: 'audio' | 'video';
   mediaKey?: string;
   name: string;
   posterKey?: string | null;
@@ -170,6 +172,7 @@ export function createEditArrayFromRuntime(project: ProjectPresent, settings: Pr
       duration: asset.duration,
       height: asset.height,
       id: asset.id,
+      kind: asset.kind,
       name: asset.name,
       size: asset.size,
       type: asset.type,
@@ -247,15 +250,17 @@ function createEditArrayProgram(
   program.push(['composite', { mode: 'track_order', tracks: tracks.map((track) => track.id) }]);
 
   assets.forEach((asset) => {
+    const kind = asset.kind ?? (asset.type.startsWith('audio/') ? 'audio' : 'video');
     program.push([
       'import',
-      'video',
+      kind,
       asset.name,
       {
         duration: formatEditArrayTime(asset.duration),
         fingerprint: asset.fingerprint,
         height: asset.height,
         id: asset.id,
+        kind,
         mediaKey: asset.mediaKey,
         posterKey: asset.posterKey,
         seconds: Number(asset.duration.toFixed(3)),

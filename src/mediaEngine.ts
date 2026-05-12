@@ -54,13 +54,86 @@ export function inferVideoMimeType(name: string, type = '') {
   }
 }
 
+export function inferAudioMimeType(name: string, type = '') {
+  const normalizedType = type.trim().toLowerCase();
+
+  if (normalizedType.startsWith('audio/') && normalizedType !== 'audio') {
+    return normalizedType;
+  }
+
+  const extension = name.toLowerCase().match(/\.[a-z0-9]+$/)?.[0] ?? '';
+
+  switch (extension) {
+    case '.mp3':
+      return 'audio/mpeg';
+    case '.wav':
+      return 'audio/wav';
+    case '.m4a':
+      return 'audio/mp4';
+    case '.aac':
+      return 'audio/aac';
+    case '.ogg':
+    case '.oga':
+      return 'audio/ogg';
+    case '.flac':
+      return 'audio/flac';
+    case '.opus':
+      return 'audio/opus';
+    default:
+      return normalizedType.startsWith('audio/') ? normalizedType : 'audio/mpeg';
+  }
+}
+
+export type MediaKind = 'audio' | 'video';
+
+export function detectMediaKind(file: Pick<File, 'name' | 'type'>): MediaKind {
+  const type = (file.type || '').toLowerCase();
+
+  if (type.startsWith('audio/')) {
+    return 'audio';
+  }
+
+  if (type.startsWith('video/')) {
+    return 'video';
+  }
+
+  return /\.(mp3|wav|m4a|aac|ogg|oga|flac|opus)$/i.test(file.name) ? 'audio' : 'video';
+}
+
+export function inferMediaMimeType(name: string, type = '') {
+  return detectMediaKind({ name, type }) === 'audio' ? inferAudioMimeType(name, type) : inferVideoMimeType(name, type);
+}
+
 export function isSupportedVideoFile(file: File) {
   return file.type.startsWith('video/') || /\.(mp4|m4v|mov|webm|mkv|avi|3gp)$/i.test(file.name);
+}
+
+export function isSupportedAudioFile(file: File) {
+  return file.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg|oga|flac|opus)$/i.test(file.name);
+}
+
+export function isSupportedMediaFile(file: File) {
+  return isSupportedVideoFile(file) || isSupportedAudioFile(file);
 }
 
 export function createTypedVideoFile(blob: Blob, name: string, lastModified = Date.now(), type = blob.type) {
   const filename = name.split('/').pop() || name || 'video.mp4';
   const inferredType = inferVideoMimeType(filename, type);
+
+  if (blob instanceof File && blob.name === filename && blob.type === inferredType) {
+    return blob;
+  }
+
+  return new File([blob], filename, {
+    lastModified,
+    type: inferredType,
+  });
+}
+
+export function createTypedMediaFile(blob: Blob, name: string, lastModified = Date.now(), type = blob.type) {
+  const filename = name.split('/').pop() || name || 'media';
+  const kind = detectMediaKind({ name: filename, type });
+  const inferredType = kind === 'audio' ? inferAudioMimeType(filename, type) : inferVideoMimeType(filename, type);
 
   if (blob instanceof File && blob.name === filename && blob.type === inferredType) {
     return blob;

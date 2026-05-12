@@ -6,11 +6,14 @@ export type JobStatus = {
   state: 'idle' | 'running' | 'complete' | 'error';
 };
 
+export type AssetKind = 'audio' | 'video';
+
 export type ProjectAsset = {
   duration: number;
   file: File;
   height: number;
   id: string;
+  kind: AssetKind;
   name: string;
   originalUrl: string;
   playbackUrl: string;
@@ -170,6 +173,20 @@ export function getVideoTracksTopFirst(project: Pick<ProjectPresent, 'tracks'>):
     .sort((a, b) => b.index - a.index);
 }
 
+export function getAudioTracksTopFirst(project: Pick<ProjectPresent, 'tracks'>): TimelineTrack[] {
+  return [...project.tracks]
+    .filter((track) => track.kind === 'audio')
+    .sort((a, b) => b.index - a.index);
+}
+
+export function getDefaultAudioTrackId(project: Pick<ProjectPresent, 'tracks'>) {
+  return (
+    [...project.tracks]
+      .filter((track) => track.kind === 'audio')
+      .sort((a, b) => a.index - b.index)[0]?.id ?? null
+  );
+}
+
 export function getNextTrackIndex(project: Pick<ProjectPresent, 'tracks'>, kind: TimelineTrack['kind']) {
   const sameKindTracks = project.tracks.filter((track) => track.kind === kind);
 
@@ -326,10 +343,12 @@ export function getClipStart(project: ProjectPresent, clipId: string) {
 export function getClipsAtTime(project: ProjectPresent, time: number) {
   const clampedTime = Math.max(time, 0);
   const trackIndexById = new Map(project.tracks.map((track) => [track.id, track.index]));
-  const visibleTrackIds = new Set(project.tracks.filter((track) => track.kind === 'video' && track.visible).map((track) => track.id));
+  const audibleTrackIds = new Set(
+    project.tracks.filter((track) => track.kind === 'video' ? track.visible : !track.muted).map((track) => track.id),
+  );
 
   return project.clips
-    .filter((clip) => visibleTrackIds.has(clip.trackId) && clampedTime >= clip.timelineStart && clampedTime < getClipEnd(clip))
+    .filter((clip) => audibleTrackIds.has(clip.trackId) && clampedTime >= clip.timelineStart && clampedTime < getClipEnd(clip))
     .sort((a, b) => (trackIndexById.get(a.trackId) ?? 0) - (trackIndexById.get(b.trackId) ?? 0))
     .map((clip) => {
       const duration = getClipDuration(clip);
@@ -344,10 +363,23 @@ export function getClipsAtTime(project: ProjectPresent, time: number) {
     });
 }
 
-export function getClipAtTime(project: ProjectPresent, time: number) {
-  const clips = getClipsAtTime(project, time);
+export function getVideoClipsAtTime(project: ProjectPresent, time: number) {
+  return getClipsAtTime(project, time).filter((entry) => entry.track?.kind === 'video');
+}
 
-  return clips[clips.length - 1] ?? null;
+export function getAudioClipsAtTime(project: ProjectPresent, time: number) {
+  return getClipsAtTime(project, time).filter((entry) => entry.track?.kind === 'audio');
+}
+
+export function getClipAtTime(project: ProjectPresent, time: number) {
+  const clips = getVideoClipsAtTime(project, time);
+
+  if (clips.length > 0) {
+    return clips[clips.length - 1];
+  }
+
+  const audio = getAudioClipsAtTime(project, time);
+  return audio[audio.length - 1] ?? null;
 }
 
 export function getAssetById(project: ProjectPresent, assetId: string | null) {

@@ -17,6 +17,7 @@ function asset(id: string, duration: number): ProjectAsset {
     file: new File(['video'], `${id}.mp4`, { type: 'video/mp4' }),
     height: 1080,
     id,
+    kind: 'video',
     name: `${id}.mp4`,
     originalUrl: `blob:${id}`,
     playbackUrl: `blob:${id}`,

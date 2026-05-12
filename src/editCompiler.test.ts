@@ -18,6 +18,7 @@ function project(): ProjectPresent {
         file,
         height: 1920,
         id: 'main',
+        kind: 'video',
         name: 'main.mp4',
         originalUrl: 'blob:source',
         playbackUrl: 'blob:source',

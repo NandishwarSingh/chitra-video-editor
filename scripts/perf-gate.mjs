@@ -80,10 +80,10 @@ const checks = [
   {
     description: 'Edit Array Language has live editor inspection',
     file: 'src/App.tsx',
-    test: (source) => source.includes('EditArrayPanel') && source.includes('createEditArrayFromRuntime'),
+    test: (source) => source.includes('edit-array-textarea') && source.includes('createEditArrayFromRuntime'),
   },
   createEditArrayCoverageCheck({
-    covered: ['id', 'name', 'type', 'size', 'duration', 'width', 'height'],
+    covered: ['id', 'name', 'kind', 'type', 'size', 'duration', 'width', 'height'],
     file: 'src/projectModel.ts',
     omitted: ['file', 'originalUrl', 'playbackUrl', 'posterUrl', 'proxyStatus', 'proxyUrl'],
     typeName: 'ProjectAsset',
@@ -113,7 +113,7 @@ const checks = [
     typeName: 'ProjectPresent',
   }),
   createEditArrayCoverageCheck({
-    covered: ['id', 'name', 'type', 'size', 'duration', 'width', 'height', 'fingerprint', 'mediaKey', 'posterKey'],
+    covered: ['id', 'name', 'kind', 'type', 'size', 'duration', 'width', 'height', 'fingerprint', 'mediaKey', 'posterKey'],
     file: 'src/projectPersistence.ts',
     omitted: [],
     typeName: 'PersistedAsset',

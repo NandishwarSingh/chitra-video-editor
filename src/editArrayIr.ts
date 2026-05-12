@@ -21,6 +21,7 @@ export type EditArrayIrAsset = {
   fingerprint?: string;
   height: number;
   id: string;
+  kind: 'audio' | 'video';
   mediaKey?: string;
   name: string;
   posterKey?: string | null;
@@ -232,21 +233,24 @@ export function compileEditArrayToIr(program: EditArrayProgram | readonly unknow
       const name = stringValue(payload[1], 'media');
       const options = payload[2];
 
-      if (kind !== 'video' || !isRecord(options)) {
+      if ((kind !== 'video' && kind !== 'audio') || !isRecord(options)) {
         ir.diagnostics.push({ code: 'unsupported_import', message: `Unsupported import instruction for ${name}.`, severity: 'warning' });
         continue;
       }
+
+      const optionsKind = options.kind === 'audio' ? 'audio' : options.kind === 'video' ? 'video' : kind;
 
       ir.assets.push({
         duration: numberValue(options.seconds, parseEditArrayTime(options.duration)),
         fingerprint: stringValue(options.fingerprint, undefined),
         height: numberValue(options.height, 0),
         id: stringValue(options.id, name),
+        kind: optionsKind,
         mediaKey: stringValue(options.mediaKey, undefined),
         name,
         posterKey: typeof options.posterKey === 'string' ? options.posterKey : null,
         size: numberValue(options.size, 0),
-        type: stringValue(options.type, 'video/mp4'),
+        type: stringValue(options.type, optionsKind === 'audio' ? 'audio/mpeg' : 'video/mp4'),
         width: numberValue(options.width, 0),
       });
       continue;

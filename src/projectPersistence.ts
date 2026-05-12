@@ -1,6 +1,6 @@
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import { createEditArrayFromDocument, createEditArrayFromRuntime, stringifyEditArray, type EditArrayProgram } from './editArrayLanguage';
-import { createMediaFingerprint, createTypedVideoFile, inferVideoMimeType } from './mediaEngine';
+import { createMediaFingerprint, createTypedMediaFile, detectMediaKind, inferMediaMimeType } from './mediaEngine';
 import {
   createDefaultTracks,
   createInitialProject,
@@ -45,6 +45,7 @@ export type PersistedAsset = {
   fingerprint: string;
   height: number;
   id: string;
+  kind: 'audio' | 'video';
   mediaKey: string;
   name: string;
   posterKey: string | null;
@@ -144,11 +145,12 @@ export function serializeRuntimeProject(project: ProjectPresent, projectId: stri
       fingerprint: createMediaFingerprint(asset.file, asset.duration),
       height: asset.height,
       id: asset.id,
+      kind: asset.kind,
       mediaKey: createProjectMediaKey(projectId, asset.id),
       name: asset.name,
       posterKey: asset.posterUrl ? createProjectPosterKey(projectId, asset.id) : null,
       size: asset.size,
-      type: inferVideoMimeType(asset.file.name || asset.name, asset.type || asset.file.type),
+      type: inferMediaMimeType(asset.file.name || asset.name, asset.type || asset.file.type),
       width: asset.width,
     })),
     clips: project.clips.map((clip) => normalizeTimelineClip(clip)),
@@ -160,7 +162,7 @@ export function serializeRuntimeProject(project: ProjectPresent, projectId: stri
 export async function storeRuntimeAssetBlobs(projectId: string, asset: ProjectAsset) {
   await putProjectMediaBlob(
     createProjectMediaKey(projectId, asset.id),
-    createTypedVideoFile(asset.file, asset.file.name || asset.name, asset.file.lastModified, asset.type || asset.file.type),
+    createTypedMediaFile(asset.file, asset.file.name || asset.name, asset.file.lastModified, asset.type || asset.file.type),
   );
 
   if (asset.posterUrl?.startsWith('data:')) {
@@ -316,6 +318,7 @@ async function recoverOrphanProjectAssets(
     }
 
     const fileName = mediaBlob instanceof File && mediaBlob.name ? mediaBlob.name : `${assetId}.mp4`;
+    const detectedKind = detectMediaKind({ name: fileName, type: mediaBlob.type });
     recovered.push(
       createRuntimeAssetFromPersisted(
         {
@@ -323,11 +326,12 @@ async function recoverOrphanProjectAssets(
           fingerprint: '',
           height: 0,
           id: assetId,
+          kind: detectedKind,
           mediaKey: key,
           name: fileName,
           posterKey: null,
           size: mediaBlob.size,
-          type: inferVideoMimeType(fileName, mediaBlob.type),
+          type: inferMediaMimeType(fileName, mediaBlob.type),
           width: 0,
         },
         mediaBlob,
@@ -346,7 +350,7 @@ export function createRuntimeAssetFromPersisted(
   posterBlob: Blob | null,
   createObjectUrl: (blob: Blob) => string,
 ): ProjectAsset {
-  const file = createTypedVideoFile(mediaBlob, asset.name, Date.now(), asset.type || mediaBlob.type);
+  const file = createTypedMediaFile(mediaBlob, asset.name, Date.now(), asset.type || mediaBlob.type);
   const originalUrl = createObjectUrl(file);
   const posterUrl = posterBlob ? createObjectUrl(posterBlob) : null;
 
@@ -355,6 +359,7 @@ export function createRuntimeAssetFromPersisted(
     file,
     height: asset.height,
     id: asset.id,
+    kind: asset.kind ?? detectMediaKind({ name: file.name, type: file.type }),
     name: asset.name,
     originalUrl,
     playbackUrl: originalUrl,
