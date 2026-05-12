@@ -1181,6 +1181,11 @@ function EditorWorkspace({
   }, [duration, getActiveMediaElement, hasTimeline, playbackRate, playhead, present]);
 
   const togglePlayback = useCallback(() => {
+    // AudioContext.resume() must be called inside a user-gesture handler in some
+    // browsers (notably Safari). Without this, source.connect(analyser).connect(destination)
+    // routes the media element's audio through a suspended context and the user hears nothing.
+    void audioContextRef.current?.resume().catch(() => undefined);
+
     if (isPlaying) {
       pausePlayback();
       return;
@@ -1839,7 +1844,9 @@ function EditorWorkspace({
       }
 
       try {
-        source.disconnect(analyser);
+        // Fully detach so the next media element doesn't double-mix through a
+        // leftover source path.
+        source.disconnect();
       } catch {
         // The source may already be detached after a hot reload or media swap.
       }
@@ -3353,16 +3360,36 @@ function Inspector({
   splitAtPlayhead,
 }: InspectorProps) {
   if (selectedText) {
+    const textDuration = Math.max(0.1, selectedText.end - selectedText.start);
+    const projectDuration = getProjectDuration(project);
+    const nudgeText = (deltaSeconds: number) => {
+      const nextStart = Math.max(0, selectedText.start + deltaSeconds);
+      dispatch({
+        patch: { end: nextStart + textDuration, start: nextStart },
+        textId: selectedText.id,
+        type: 'UPDATE_TEXT',
+      });
+    };
+
     return (
       <>
         <div className="panel-header">
           <div>
             <h2>Text</h2>
-            <span>{formatClock(selectedText.start)} - {formatClock(selectedText.end)}</span>
+            <span>{selectedText.text || 'Untitled overlay'}</span>
           </div>
           <Type size={16} />
         </div>
         <div className="control-stack">
+          <div className="meta-grid">
+            <span>Duration</span>
+            <strong>{formatClock(textDuration)}</strong>
+            <span>Range</span>
+            <strong>{formatClock(selectedText.start)} - {formatClock(selectedText.end)}</strong>
+            <span>Timeline</span>
+            <strong>{formatClock(selectedText.start)}</strong>
+          </div>
+
           <label className="field">
             <span>Content</span>
             <input
@@ -3370,8 +3397,36 @@ function Inspector({
               value={selectedText.text}
             />
           </label>
-          <ControlNumber label="Start" max={getProjectDuration(project)} min={0} step={0.05} value={selectedText.start} onChange={(value) => dispatch({ patch: { start: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
-          <ControlNumber label="End" max={getProjectDuration(project) + 20} min={0} step={0.05} value={selectedText.end} onChange={(value) => dispatch({ patch: { end: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <ControlNumber
+            label="Timeline Start"
+            max={projectDuration}
+            min={0}
+            step={0.05}
+            value={selectedText.start}
+            onChange={(value) =>
+              dispatch({
+                patch: { end: value + textDuration, start: value },
+                textId: selectedText.id,
+                type: 'UPDATE_TEXT',
+              })
+            }
+          />
+          <ControlNumber
+            label="Duration"
+            max={Math.max(projectDuration - selectedText.start, 0.1)}
+            min={0.1}
+            step={0.05}
+            value={textDuration}
+            onChange={(value) =>
+              dispatch({
+                patch: { end: selectedText.start + value },
+                textId: selectedText.id,
+                type: 'UPDATE_TEXT',
+              })
+            }
+          />
+
+          <div className="subhead">Canvas Position</div>
           <ControlNumber label="X" max={0.98} min={0.02} step={0.01} value={selectedText.x} onChange={(value) => dispatch({ patch: { x: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
           <ControlNumber label="Y" max={0.98} min={0.02} step={0.01} value={selectedText.y} onChange={(value) => dispatch({ patch: { y: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
           <ControlNumber label="Size" max={96} min={12} step={1} value={selectedText.size} onChange={(value) => dispatch({ patch: { size: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
@@ -3392,10 +3447,32 @@ function Inspector({
               <option value="right">Right</option>
             </select>
           </label>
-          <button className="button secondary full-width" onClick={deleteSelected} type="button">
-            <Trash2 size={15} />
-            Delete Text
-          </button>
+
+          <div className="button-grid">
+            <button
+              className="button secondary"
+              disabled={selectedText.start <= 0}
+              onClick={() => nudgeText(-0.25)}
+              type="button"
+            >
+              <StepBack size={15} />
+              Nudge Left
+            </button>
+            <button className="button secondary" onClick={() => nudgeText(0.25)} type="button">
+              <StepForward size={15} />
+              Nudge Right
+            </button>
+          </div>
+          <div className="button-grid">
+            <button className="button secondary" onClick={splitAtPlayhead} type="button">
+              <Scissors size={15} />
+              Split
+            </button>
+            <button className="button secondary" onClick={deleteSelected} type="button">
+              <Trash2 size={15} />
+              Delete
+            </button>
+          </div>
         </div>
       </>
     );

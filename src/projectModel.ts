@@ -432,6 +432,33 @@ function getTrackEnd(project: ProjectPresent, trackId: string) {
     .reduce((max, clip) => Math.max(max, getClipEnd(clip)), 0);
 }
 
+export function findFreeTimelineStart(
+  project: Pick<ProjectPresent, 'clips'>,
+  trackId: string,
+  desiredStart: number,
+  duration: number,
+  excludeClipId: string | null = null,
+): number {
+  const sorted = project.clips
+    .filter((clip) => clip.trackId === trackId && clip.id !== excludeClipId)
+    .sort((a, b) => a.timelineStart - b.timelineStart);
+
+  let start = Math.max(0, desiredStart);
+  const minDuration = Math.max(duration, MIN_CLIP_DURATION);
+
+  for (const clip of sorted) {
+    const clipStart = clip.timelineStart;
+    const clipEnd = getClipEnd(clip);
+
+    if (start + minDuration > clipStart + 0.001 && start + 0.001 < clipEnd) {
+      // Would overlap this clip. Snap to immediately after it.
+      start = clipEnd;
+    }
+  }
+
+  return start;
+}
+
 function rippleTrack(project: ProjectPresent, trackId: string, afterTime: number, delta: number, exceptClipIds = new Set<string>()) {
   if (Math.abs(delta) < 0.001) {
     return project.clips;
@@ -603,7 +630,9 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
       }
 
       const trackId = action.trackId ?? project.selectedTrackId ?? getDefaultVideoTrackId(project);
-      const timelineStart = action.timelineStart ?? getTrackEnd(project, trackId);
+      const desiredStart = action.timelineStart ?? getTrackEnd(project, trackId);
+      const clipDuration = Math.max(MIN_CLIP_DURATION, asset.duration || MIN_CLIP_DURATION);
+      const timelineStart = findFreeTimelineStart(project, trackId, desiredStart, clipDuration);
       const clip = createTimelineClip(action.clipId, action.assetId, asset.duration, timelineStart, trackId);
 
       return {
@@ -808,7 +837,8 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
       }
 
       const trackId = action.trackId && project.tracks.some((track) => track.id === action.trackId) ? action.trackId : clip.trackId;
-      const timelineStart = Math.max(0, action.timelineStart ?? clip.timelineStart);
+      const desiredStart = Math.max(0, action.timelineStart ?? clip.timelineStart);
+      const timelineStart = findFreeTimelineStart(project, trackId, desiredStart, getClipDuration(clip), clip.id);
 
       return {
         ...project,

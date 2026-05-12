@@ -95,11 +95,11 @@ describe('project model', () => {
     expect(getClipDuration(clip)).toBeCloseTo(0.1);
   });
 
-  it('moves clips by timeline start', () => {
+  it('moves clips by timeline start (to a non-overlapping position)', () => {
     let state = projectWithTwoClips();
-    state = projectReducer(state, { clipId: 'clip-b', timelineStart: 2, type: 'MOVE_CLIP' });
+    state = projectReducer(state, { clipId: 'clip-b', timelineStart: 12, type: 'MOVE_CLIP' });
 
-    expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(2);
+    expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(12);
   });
 
   it('deletes the selected clip and ripples later clips on that track', () => {
@@ -125,15 +125,15 @@ describe('project model', () => {
 
   it('supports undo and redo for edit operations', () => {
     let state = projectWithTwoClips();
-    state = projectReducer(state, { clipId: 'clip-b', timelineStart: 2, type: 'MOVE_CLIP' });
+    state = projectReducer(state, { clipId: 'clip-b', timelineStart: 12, type: 'MOVE_CLIP' });
 
-    expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(2);
+    expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(12);
 
     state = projectReducer(state, { type: 'UNDO' });
     expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(10);
 
     state = projectReducer(state, { type: 'REDO' });
-    expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(2);
+    expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(12);
   });
 
   it('looks up the active clip from a global timeline time', () => {
@@ -160,6 +160,32 @@ describe('project model', () => {
     state = projectReducer(state, { assetId: 'a', type: 'DELETE_ASSET' });
 
     expect(state.present.clips.map((clip) => [clip.id, clip.timelineStart])).toEqual([['clip-b', 0]]);
+  });
+
+  it('snaps a dropped clip to the next free slot when the requested position overlaps', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 10), asset('b', 4)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+
+    // clip-a occupies [0, 10] on video-1. Dropping clip-b at t=3 should land it at t=10.
+    state = projectReducer(state, { assetId: 'b', clipId: 'clip-b', timelineStart: 3, type: 'ADD_ASSET_TO_TIMELINE' });
+
+    expect(state.present.clips.map((clip) => [clip.id, clip.timelineStart])).toEqual([
+      ['clip-a', 0],
+      ['clip-b', 10],
+    ]);
+  });
+
+  it('snaps a moved clip past the conflicting clip on the same track', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 10), asset('b', 4)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, { assetId: 'b', clipId: 'clip-b', type: 'ADD_ASSET_TO_TIMELINE' });
+
+    // clip-a [0, 10], clip-b [10, 14]. Try to move clip-b to t=4 — should snap to t=10.
+    state = projectReducer(state, { clipId: 'clip-b', timelineStart: 4, type: 'MOVE_CLIP' });
+
+    expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(10);
   });
 
   it('finds the earliest clip even when the timeline has a leading gap', () => {
