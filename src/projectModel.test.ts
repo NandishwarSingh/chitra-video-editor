@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  collectSnapTargets,
   createInitialProject,
+  getActiveTextOverlays,
   getClipAtTime,
   getClipDuration,
   getFirstClipByTimelineOrder,
@@ -8,6 +10,7 @@ import {
   getProjectDuration,
   idleJobStatus,
   projectReducer,
+  snapToTarget,
   type ProjectAsset,
 } from './projectModel';
 
@@ -250,5 +253,58 @@ describe('project model', () => {
 
     expect(getNextClipAfter(state.present, 4)?.id).toBe('clip-b');
     expect(getNextClipAfter(state.present, 100)).toBeNull();
+  });
+
+  it('collects snap targets from clip and overlay edges plus optional playhead', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 4), asset('b', 5)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, { assetId: 'b', clipId: 'clip-b', type: 'ADD_ASSET_TO_TIMELINE' });
+
+    const targets = collectSnapTargets(state.present, { includePlayhead: 2.5 });
+
+    expect(targets).toContain(0);
+    expect(targets).toContain(4); // clip-a end / clip-b start
+    expect(targets).toContain(9); // clip-b end
+    expect(targets).toContain(2.5);
+
+    const without = collectSnapTargets(state.present, { excludeClipId: 'clip-b' });
+    expect(without).not.toContain(9);
+  });
+
+  it('snaps to the nearest target within tolerance and otherwise leaves the value alone', () => {
+    const targets = [0, 4, 9];
+
+    expect(snapToTarget(4.05, targets, 0.1)).toEqual({ target: 4, value: 4 });
+    expect(snapToTarget(4.08, targets, 0.05)).toEqual({ target: null, value: 4.08 });
+
+    // Prefers the closer target when two are in range.
+    expect(snapToTarget(4.2, [4, 4.3], 0.5)).toEqual({ target: 4.3, value: 4.3 });
+  });
+
+  it('hides text overlays on text tracks that are not visible', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 10)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, {
+      overlay: {
+        align: 'center',
+        end: 3,
+        id: 'text-a',
+        size: 32,
+        start: 0,
+        text: 'Hi',
+        trackId: 'text-1',
+        x: 0.5,
+        y: 0.2,
+      },
+      type: 'ADD_TEXT',
+    });
+
+    expect(getActiveTextOverlays(state.present, 1).map((o) => o.id)).toEqual(['text-a']);
+
+    state = projectReducer(state, { patch: { visible: false }, trackId: 'text-1', type: 'UPDATE_TRACK' });
+
+    expect(getActiveTextOverlays(state.present, 1)).toEqual([]);
   });
 });

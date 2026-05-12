@@ -6,6 +6,7 @@ import {
   FileArchive,
   Film,
   FolderOpen,
+  Magnet,
   Maximize2,
   Music,
   Pause,
@@ -56,6 +57,7 @@ import {
 import { performanceMonitor, usePerformanceSnapshot } from './performanceMonitor';
 import { usePreviewCompositor } from './previewCompositor';
 import {
+  collectSnapTargets,
   getActiveTextOverlays,
   getAssetById,
   getAudioClipsAtTime,
@@ -76,6 +78,7 @@ import {
   getVideoTracksTopFirst,
   idleJobStatus,
   projectReducer,
+  snapToTarget,
   type ClipTransform,
   type JobStatus,
   type ProjectAsset,
@@ -570,27 +573,32 @@ function EditorWorkspace({
   const [showPerfHud, setShowPerfHud] = useState(() => new URLSearchParams(window.location.search).has('perf'));
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [rightPanelTab, setRightPanelTab] = useState<'chat' | 'inspector'>('inspector');
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const snapIndicatorRef = useRef<HTMLDivElement>(null);
 
   const present = project.present;
-  const duration = getProjectDuration(present);
-  const activeLayerTimelines = getVideoClipsAtTime(present, playhead);
-  const activeAudioLayerTimelines = getAudioClipsAtTime(present, playhead);
-  const activeTimeline =
-    activeLayerTimelines[activeLayerTimelines.length - 1] ??
-    activeAudioLayerTimelines[activeAudioLayerTimelines.length - 1] ??
-    null;
+  const duration = useMemo(() => getProjectDuration(present), [present]);
+  const activeLayerTimelines = useMemo(() => getVideoClipsAtTime(present, playhead), [present, playhead]);
+  const activeAudioLayerTimelines = useMemo(() => getAudioClipsAtTime(present, playhead), [present, playhead]);
+  const activeTextOverlays = useMemo(() => getActiveTextOverlays(present, playhead), [present, playhead]);
+  const activeTimeline = useMemo(
+    () =>
+      activeLayerTimelines[activeLayerTimelines.length - 1] ??
+      activeAudioLayerTimelines[activeAudioLayerTimelines.length - 1] ??
+      null,
+    [activeLayerTimelines, activeAudioLayerTimelines],
+  );
   const activePrimaryKind: 'audio' | 'video' | 'none' =
     activeLayerTimelines.length > 0 ? 'video' : activeAudioLayerTimelines.length > 0 ? 'audio' : 'none';
   const getActiveMediaElement = useCallback((): HTMLMediaElement | null => {
     return activeMediaRef.current;
   }, []);
-  const selectedClip = getSelectedClip(present);
-  const selectedText = getSelectedText(present);
-  const selectedAsset = getAssetById(present, present.selectedAssetId);
+  const selectedClip = useMemo(() => getSelectedClip(present), [present]);
+  const selectedText = useMemo(() => getSelectedText(present), [present]);
+  const selectedAsset = useMemo(() => getAssetById(present, present.selectedAssetId), [present]);
   const activeClip = activeTimeline?.clip ?? null;
-  const activeAsset = getClipAsset(present, activeClip);
-  const selectedClipAsset = getClipAsset(present, selectedClip);
-  const activeTextOverlays = getActiveTextOverlays(present, playhead);
+  const activeAsset = useMemo(() => getClipAsset(present, activeClip), [activeClip, present]);
+  const selectedClipAsset = useMemo(() => getClipAsset(present, selectedClip), [present, selectedClip]);
   const activeEffectSettings = activeClip?.effects ?? DEFAULT_EFFECT_SETTINGS;
   const activeEffects = hasActiveEffects(activeEffectSettings);
   const hasTimeline = present.clips.length > 0 && duration > 0;
@@ -738,6 +746,65 @@ function EditorWorkspace({
   const setDragMode = useCallback((mode: DragMode) => {
     dragModeRef.current = mode;
   }, []);
+
+  const hideSnapIndicator = useCallback(() => {
+    const indicator = snapIndicatorRef.current;
+    if (indicator) {
+      indicator.style.opacity = '0';
+    }
+  }, []);
+
+  const showSnapIndicatorAt = useCallback(
+    (time: number) => {
+      const indicator = snapIndicatorRef.current;
+      if (!indicator) {
+        return;
+      }
+      const x = TIMELINE_LABEL_WIDTH + time * timelinePixelsPerSecond;
+      indicator.style.transform = `translate3d(${x}px, 0, 0)`;
+      indicator.style.opacity = '1';
+    },
+    [timelinePixelsPerSecond],
+  );
+
+  const resolveSnap = useCallback(
+    (desired: number, options: { event?: PointerEvent<HTMLElement>; excludeClipId?: string; excludeTextId?: string; includeOtherEdge?: number }): number => {
+      if (!snapEnabled) {
+        hideSnapIndicator();
+        return desired;
+      }
+
+      const event = options.event;
+      if (event && (event.metaKey || event.ctrlKey)) {
+        hideSnapIndicator();
+        return desired;
+      }
+
+      const tolerance = 8 / Math.max(1, timelinePixelsPerSecond);
+      const targets = collectSnapTargets(present, {
+        excludeClipId: options.excludeClipId ?? null,
+        excludeTextId: options.excludeTextId ?? null,
+        includePlayhead: playhead,
+      });
+
+      let candidates = targets;
+      // When the user is sliding an edge, also let the OTHER edge of the same
+      // clip/overlay attract — useful for shrinking/growing without losing
+      // the visible "other side" anchor.
+      if (typeof options.includeOtherEdge === 'number' && Number.isFinite(options.includeOtherEdge)) {
+        candidates = [...targets, options.includeOtherEdge].sort((a, b) => a - b);
+      }
+
+      const result = snapToTarget(desired, candidates, tolerance);
+      if (result.target !== null) {
+        showSnapIndicatorAt(result.target);
+      } else {
+        hideSnapIndicator();
+      }
+      return result.value;
+    },
+    [hideSnapIndicator, playhead, present, showSnapIndicatorAt, snapEnabled, timelinePixelsPerSecond],
+  );
 
   const getCurrentEditTime = useCallback(() => clamp(getVisualTime(), 0, duration || 0), [duration, getVisualTime]);
 
@@ -1345,10 +1412,18 @@ function EditorWorkspace({
           const deltaSeconds = (event.clientX - mode.startX) / timelinePixelsPerSecond;
           const startingTrack = present.tracks.find((track) => track.id === mode.startTrackId);
           const dragKind: 'audio' | 'video' = startingTrack?.kind === 'audio' ? 'audio' : 'video';
+          const draggedClip = present.clips.find((c) => c.id === mode.clipId);
+          const clipDuration = draggedClip ? getClipDuration(draggedClip) : 0;
+          const rawStart = Math.max(0, mode.startTimelineStart + deltaSeconds);
+          const snappedStart = resolveSnap(rawStart, {
+            event,
+            excludeClipId: mode.clipId,
+            includeOtherEdge: rawStart + clipDuration,
+          });
           dispatch({
             clipId: mode.clipId,
             record: false,
-            timelineStart: Math.max(0, mode.startTimelineStart + deltaSeconds),
+            timelineStart: snappedStart,
             trackId: getTimelineTrackIdFromClientY(event.clientY, dragKind),
             type: 'MOVE_CLIP',
           });
@@ -1356,7 +1431,12 @@ function EditorWorkspace({
       } else if (mode.type === 'timeline-text-move') {
         const overlayDuration = Math.max(0.1, mode.startEnd - mode.startStart);
         const deltaSeconds = (event.clientX - mode.startX) / timelinePixelsPerSecond;
-        const nextStart = clamp(mode.startStart + deltaSeconds, 0, Math.max(0, duration - overlayDuration));
+        const rawStart = clamp(mode.startStart + deltaSeconds, 0, Math.max(0, duration - overlayDuration));
+        const nextStart = resolveSnap(rawStart, {
+          event,
+          excludeTextId: mode.textId,
+          includeOtherEdge: rawStart + overlayDuration,
+        });
 
         dispatch({
           patch: {
@@ -1371,7 +1451,14 @@ function EditorWorkspace({
         const clip = present.clips.find((candidate) => candidate.id === mode.clipId);
 
         if (clip) {
-          const sourceTime = clip.sourceIn + (time - clip.timelineStart);
+          const clipEnd = getClipEnd(clip);
+          const otherEdge = mode.type === 'trim-start' ? clipEnd : clip.timelineStart;
+          const snappedTime = resolveSnap(time, {
+            event,
+            excludeClipId: clip.id,
+            includeOtherEdge: otherEdge,
+          });
+          const sourceTime = clip.sourceIn + (snappedTime - clip.timelineStart);
           dispatch({
             clipId: clip.id,
             edge: mode.type === 'trim-start' ? 'start' : 'end',
@@ -1384,7 +1471,12 @@ function EditorWorkspace({
 
         if (overlay) {
           if (mode.type === 'text-trim-start') {
-            const nextStart = clamp(time, 0, overlay.end - 0.1);
+            const rawStart = clamp(time, 0, overlay.end - 0.1);
+            const nextStart = resolveSnap(rawStart, {
+              event,
+              excludeTextId: overlay.id,
+              includeOtherEdge: overlay.end,
+            });
             dispatch({
               patch: { start: nextStart },
               record: false,
@@ -1392,7 +1484,12 @@ function EditorWorkspace({
               type: 'UPDATE_TEXT',
             });
           } else {
-            const nextEnd = clamp(time, overlay.start + 0.1, duration);
+            const rawEnd = clamp(time, overlay.start + 0.1, duration);
+            const nextEnd = resolveSnap(rawEnd, {
+              event,
+              excludeTextId: overlay.id,
+              includeOtherEdge: overlay.start,
+            });
             dispatch({
               patch: { end: nextEnd },
               record: false,
@@ -1405,7 +1502,7 @@ function EditorWorkspace({
 
       return time;
     },
-    [applyVisualTime, duration, getTimelineTimeFromClientX, getTimelineTrackIdFromClientY, present, timelinePixelsPerSecond, timelineTimeToVideoTime],
+    [applyVisualTime, duration, getTimelineTimeFromClientX, getTimelineTrackIdFromClientY, present, resolveSnap, timelinePixelsPerSecond, timelineTimeToVideoTime],
   );
 
   const onTimelinePointerDown = useCallback(
@@ -1576,15 +1673,24 @@ function EditorWorkspace({
       if (mode?.type === 'clip-move' && time !== null) {
         if (!isClipReorderDrag(mode.startX, mode.startY, event.clientX, event.clientY, CLIP_REORDER_DRAG_THRESHOLD_PX)) {
           setDragMode(null);
+          hideSnapIndicator();
           return;
         }
 
         const deltaSeconds = (event.clientX - mode.startX) / timelinePixelsPerSecond;
         const startingTrack = present.tracks.find((track) => track.id === mode.startTrackId);
         const dragKind: 'audio' | 'video' = startingTrack?.kind === 'audio' ? 'audio' : 'video';
+        const draggedClip = present.clips.find((c) => c.id === mode.clipId);
+        const clipDuration = draggedClip ? getClipDuration(draggedClip) : 0;
+        const rawStart = Math.max(0, mode.startTimelineStart + deltaSeconds);
+        const snappedStart = resolveSnap(rawStart, {
+          event,
+          excludeClipId: mode.clipId,
+          includeOtherEdge: rawStart + clipDuration,
+        });
         dispatch({
           clipId: mode.clipId,
-          timelineStart: Math.max(0, mode.startTimelineStart + deltaSeconds),
+          timelineStart: snappedStart,
           trackId: getTimelineTrackIdFromClientY(event.clientY, dragKind),
           type: 'MOVE_CLIP',
         });
@@ -1593,12 +1699,18 @@ function EditorWorkspace({
       if (mode?.type === 'timeline-text-move') {
         if (!isClipReorderDrag(mode.startX, 0, event.clientX, 0, CLIP_REORDER_DRAG_THRESHOLD_PX)) {
           setDragMode(null);
+          hideSnapIndicator();
           return;
         }
 
         const overlayDuration = Math.max(0.1, mode.startEnd - mode.startStart);
         const deltaSeconds = (event.clientX - mode.startX) / timelinePixelsPerSecond;
-        const nextStart = clamp(mode.startStart + deltaSeconds, 0, Math.max(0, duration - overlayDuration));
+        const rawStart = clamp(mode.startStart + deltaSeconds, 0, Math.max(0, duration - overlayDuration));
+        const nextStart = resolveSnap(rawStart, {
+          event,
+          excludeTextId: mode.textId,
+          includeOtherEdge: rawStart + overlayDuration,
+        });
 
         dispatch({
           patch: {
@@ -1614,10 +1726,11 @@ function EditorWorkspace({
         void playPlayback();
       }
 
+      hideSnapIndicator();
       setDragMode(null);
       markSeekEnd();
     },
-    [duration, getTimelineTrackIdFromClientY, markSeekEnd, playPlayback, setDragMode, timelinePixelsPerSecond, updateFromPointer],
+    [duration, getTimelineTrackIdFromClientY, hideSnapIndicator, markSeekEnd, playPlayback, present, resolveSnap, setDragMode, timelinePixelsPerSecond, updateFromPointer],
   );
 
   const onAssetDragStart = useCallback((event: ReactDragEvent<HTMLDivElement>, asset: ProjectAsset) => {
@@ -2702,6 +2815,15 @@ function EditorWorkspace({
           </div>
 
           <div className="timeline-tools">
+            <button
+              aria-label={snapEnabled ? 'Disable snapping' : 'Enable snapping'}
+              className={`icon-button small${snapEnabled ? ' is-active' : ''}`}
+              onClick={() => setSnapEnabled((value) => !value)}
+              title={snapEnabled ? 'Snapping on — hold ⌘/Ctrl to bypass' : 'Snapping off'}
+              type="button"
+            >
+              <Magnet size={15} />
+            </button>
             <button aria-label="Zoom timeline out" className="icon-button small" onClick={() => setTimelineZoom((value) => clamp(value - 0.2, 0.5, 3))} title="Zoom timeline out" type="button">
               <ZoomOut size={15} />
             </button>
@@ -2778,6 +2900,7 @@ function EditorWorkspace({
             <div className="timeline-playhead" ref={playheadRef}>
               <span />
             </div>
+            <div aria-hidden="true" className="timeline-snap-indicator" ref={snapIndicatorRef} />
 
             {videoTracks.map((track, index) => {
               const top = TIMELINE_TRACK_TOP + index * (TIMELINE_TRACK_HEIGHT + TIMELINE_TRACK_GAP);

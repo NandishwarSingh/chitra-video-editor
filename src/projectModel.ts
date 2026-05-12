@@ -405,7 +405,20 @@ export function getSelectedText(project: ProjectPresent) {
 }
 
 export function getActiveTextOverlays(project: ProjectPresent, playhead: number) {
-  return project.textOverlays.filter((overlay) => playhead >= overlay.start && playhead <= overlay.end);
+  const visibleTextTrackIds = new Set(
+    project.tracks.filter((track) => track.kind === 'text' && track.visible).map((track) => track.id),
+  );
+
+  return project.textOverlays.filter((overlay) => {
+    if (!visibleTextTrackIds.has(overlay.trackId)) {
+      // Legacy overlays without a real text track still need to render until
+      // the user explicitly hides them.
+      if (overlay.trackId) {
+        return false;
+      }
+    }
+    return playhead >= overlay.start && playhead <= overlay.end;
+  });
 }
 
 function clampSourceTime(asset: ProjectAsset | null, value: number) {
@@ -439,6 +452,66 @@ function getTrackEnd(project: ProjectPresent, trackId: string) {
   return project.clips
     .filter((clip) => clip.trackId === trackId)
     .reduce((max, clip) => Math.max(max, getClipEnd(clip)), 0);
+}
+
+export type SnapTargetOptions = {
+  excludeClipId?: string | null;
+  excludeTextId?: string | null;
+  includePlayhead?: number | null;
+};
+
+export function collectSnapTargets(
+  project: Pick<ProjectPresent, 'clips' | 'textOverlays' | 'tracks'>,
+  options: SnapTargetOptions = {},
+): number[] {
+  const targets = new Set<number>();
+  targets.add(0);
+
+  for (const clip of project.clips) {
+    if (clip.id === options.excludeClipId) {
+      continue;
+    }
+    targets.add(round(clip.timelineStart));
+    targets.add(round(getClipEnd(clip)));
+  }
+
+  for (const overlay of project.textOverlays) {
+    if (overlay.id === options.excludeTextId) {
+      continue;
+    }
+    targets.add(round(overlay.start));
+    targets.add(round(overlay.end));
+  }
+
+  if (typeof options.includePlayhead === 'number' && Number.isFinite(options.includePlayhead)) {
+    targets.add(round(options.includePlayhead));
+  }
+
+  return [...targets].sort((a, b) => a - b);
+}
+
+export type SnapResult = {
+  target: number | null;
+  value: number;
+};
+
+export function snapToTarget(desired: number, targets: number[], toleranceSeconds: number): SnapResult {
+  let best: number | null = null;
+  let bestDistance = toleranceSeconds;
+
+  for (const target of targets) {
+    const distance = Math.abs(target - desired);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = target;
+    }
+  }
+
+  return best === null ? { target: null, value: desired } : { target: best, value: best };
+}
+
+function round(value: number) {
+  return Math.round(value * 10000) / 10000;
 }
 
 export function findFreeTimelineStart(

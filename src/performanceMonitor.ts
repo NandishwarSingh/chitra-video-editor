@@ -255,7 +255,7 @@ class PerformanceMonitor {
   }
 
   private emit() {
-    this.publicSnapshot = {
+    const next: PerformanceSnapshot = {
       activeTranscodeJob: this.snapshot.activeTranscodeJob,
       exportProgress: this.snapshot.exportProgress,
       fps: this.snapshot.fps,
@@ -273,6 +273,20 @@ class PerformanceMonitor {
       memoryMb: this.snapshot.memoryMb,
     };
 
+    const previous = this.publicSnapshot;
+    let changed = false;
+    for (const key of Object.keys(next) as Array<keyof PerformanceSnapshot>) {
+      if (next[key] !== previous[key]) {
+        changed = true;
+        break;
+      }
+    }
+
+    if (!changed) {
+      return;
+    }
+
+    this.publicSnapshot = next;
     this.listeners.forEach((listener) => listener());
   }
 
