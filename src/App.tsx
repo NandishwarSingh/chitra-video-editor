@@ -151,7 +151,10 @@ const TIMELINE_TRACK_GAP = 8;
 const TIMELINE_TEXT_TRACK_HEIGHT = 42;
 const TIMELINE_LABEL_WIDTH = 116;
 const MAX_TIMELINE_CLIP_THUMBNAILS = 14;
-const mediaElementAudioSources = new WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>();
+type MediaElementWithCaptureStream = HTMLMediaElement & {
+  captureStream?: () => MediaStream;
+  mozCaptureStream?: () => MediaStream;
+};
 
 function createId(prefix: string) {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -1794,7 +1797,7 @@ function EditorWorkspace({
   }, [activeTimeline?.clip.muted, activeTimeline?.clip.volume]);
 
   useEffect(() => {
-    const media = getActiveMediaElement();
+    const media = getActiveMediaElement() as MediaElementWithCaptureStream | null;
 
     if (!media || !activeAsset) {
       audioAnalyserRef.current = null;
@@ -1804,8 +1807,12 @@ function EditorWorkspace({
     }
 
     const AudioContextConstructor = getAudioContextConstructor();
+    const captureStream = media.captureStream ?? media.mozCaptureStream;
 
-    if (!AudioContextConstructor) {
+    if (!AudioContextConstructor || !captureStream) {
+      // Without captureStream / Web Audio we still want playback to work —
+      // the element plays through the default audio output natively. The meter
+      // just sits at silence.
       paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
       if (audioMeterReadoutRef.current) {
         audioMeterReadoutRef.current.textContent = 'N/A';
@@ -1813,48 +1820,84 @@ function EditorWorkspace({
       return;
     }
 
-    const context = audioContextRef.current ?? new AudioContextConstructor();
-    audioContextRef.current = context;
+    let analyser: AnalyserNode | null = null;
+    let source: MediaStreamAudioSourceNode | null = null;
 
-    const analyser = context.createAnalyser();
-    analyser.fftSize = 1024;
-    analyser.smoothingTimeConstant = 0.82;
+    const setupMeter = () => {
+      if (analyser) {
+        return;
+      }
 
-    let source = mediaElementAudioSources.get(media);
-    if (!source) {
-      source = context.createMediaElementSource(media);
-      mediaElementAudioSources.set(media, source);
-    }
+      let stream: MediaStream;
+      try {
+        stream = captureStream.call(media);
+      } catch {
+        return;
+      }
 
-    try {
-      source.connect(analyser);
-      analyser.connect(context.destination);
-      audioAnalyserRef.current = analyser;
-      audioMeterDataRef.current = new Uint8Array(analyser.fftSize);
-    } catch {
-      audioAnalyserRef.current = null;
-      audioMeterDataRef.current = null;
-      paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
-    }
+      if (stream.getAudioTracks().length === 0) {
+        return;
+      }
+
+      try {
+        const context = audioContextRef.current ?? new AudioContextConstructor();
+        audioContextRef.current = context;
+
+        const newAnalyser = context.createAnalyser();
+        newAnalyser.fftSize = 1024;
+        newAnalyser.smoothingTimeConstant = 0.82;
+
+        const newSource = context.createMediaStreamSource(stream);
+        // Tap into the analyser only. We deliberately do NOT connect to
+        // context.destination — the media element is already playing its audio
+        // through the default audio output. Connecting destination here would
+        // double-mix and (worse) keep audio inaudible when the context is
+        // suspended.
+        newSource.connect(newAnalyser);
+
+        analyser = newAnalyser;
+        source = newSource;
+        audioAnalyserRef.current = analyser;
+        audioMeterDataRef.current = new Uint8Array(analyser.fftSize);
+      } catch {
+        analyser = null;
+        source = null;
+      }
+    };
+
+    const onPlay = () => {
+      // play() ran inside a user-gesture chain, so this is the right moment to
+      // resume any AudioContext we created for the meter analyser.
+      void audioContextRef.current?.resume().catch(() => undefined);
+      setupMeter();
+    };
+    const onLoadedData = () => setupMeter();
+
+    media.addEventListener('play', onPlay);
+    media.addEventListener('loadeddata', onLoadedData);
+
+    // Try setup once eagerly in case the element already has data.
+    setupMeter();
 
     return () => {
+      media.removeEventListener('play', onPlay);
+      media.removeEventListener('loadeddata', onLoadedData);
+
       if (audioAnalyserRef.current === analyser) {
         audioAnalyserRef.current = null;
         audioMeterDataRef.current = null;
       }
 
       try {
-        // Fully detach so the next media element doesn't double-mix through a
-        // leftover source path.
-        source.disconnect();
+        source?.disconnect();
       } catch {
-        // The source may already be detached after a hot reload or media swap.
+        // already detached
       }
 
       try {
-        analyser.disconnect();
+        analyser?.disconnect();
       } catch {
-        // The analyser may already be detached after a hot reload or media swap.
+        // already detached
       }
 
       paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
