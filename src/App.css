@@ -85,9 +85,9 @@ select:focus-visible {
 
 .topbar {
   display: grid;
-  grid-template-columns: 210px minmax(260px, 1fr) 170px auto;
+  grid-template-columns: 210px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
   min-width: 0;
   padding: 7px 12px;
   border-bottom: 1px solid var(--line);
