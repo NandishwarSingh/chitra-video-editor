@@ -3,7 +3,7 @@ import type { EditArrayProgram } from './editArrayLanguage';
 
 export type EditRuntimeOperation =
   | { type: 'IMPORT_ASSET'; assetId: string; name: string }
-  | { type: 'CREATE_TRACK'; trackId: string; kind: 'audio' | 'video'; index: number; name: string }
+  | { type: 'CREATE_TRACK'; trackId: string; kind: 'audio' | 'text' | 'video'; index: number; name: string }
   | { type: 'PLACE_CLIP'; assetId: string; clipId: string; sourceIn: number; sourceOut: number; timelineStart: number; trackId: string }
   | { type: 'SET_AUDIO'; clipId: string; fadeIn: number; fadeOut: number; muted: boolean; volume: number }
   | { type: 'APPLY_EFFECT'; clipId: string; settings: EditArrayIr['clips'][number]['effects'] }

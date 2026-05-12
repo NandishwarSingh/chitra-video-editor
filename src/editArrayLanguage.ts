@@ -62,7 +62,7 @@ export const EDIT_ARRAY_FIELD_POLICY = {
     omitted: [],
   },
   TextOverlay: {
-    covered: ['id', 'text', 'start', 'end', 'x', 'y', 'size', 'align'],
+    covered: ['id', 'text', 'trackId', 'start', 'end', 'x', 'y', 'size', 'align'],
     omitted: [],
   },
   TimelineClip: {
@@ -79,7 +79,7 @@ export type EditArrayInstruction =
   | ['schema', 'chitra_edit_array', { version: typeof EDIT_ARRAY_LANGUAGE_VERSION }]
   | ['project', { name: string; settings: ProjectSettings }]
   | ['timeline', { assets: number; clips: number; duration: string; layers: string[]; seconds: number; text: number }]
-  | ['track', { id: string; index: number; kind: 'audio' | 'video'; locked: boolean; muted: boolean; name: string; visible: boolean }]
+  | ['track', { id: string; index: number; kind: 'audio' | 'text' | 'video'; locked: boolean; muted: boolean; name: string; visible: boolean }]
   | ['track_visibility', string, { visible: boolean }]
   | ['composite', { mode: 'track_order'; tracks: string[] }]
   | ['move_clip', string, { start: string; trackId: string }]
@@ -134,9 +134,10 @@ export type EditArrayInstruction =
         duration: string;
         end: string;
         id: string;
-        layer: 'text:1';
+        layer: string;
         position: { x: number; y: number };
         size: number;
+        trackId: string;
       },
     ];
 
@@ -319,6 +320,7 @@ function createEditArrayProgram(
   });
 
   textOverlays.forEach((overlay) => {
+    const trackId = overlay.trackId || 'text-1';
     program.push([
       'text',
       overlay.text,
@@ -328,12 +330,13 @@ function createEditArrayProgram(
         duration: formatEditArrayTime(overlay.end - overlay.start),
         end: formatEditArrayTime(overlay.end),
         id: overlay.id,
-        layer: 'text:1',
+        layer: `text:${trackId}`,
         position: {
           x: Number(overlay.x.toFixed(3)),
           y: Number(overlay.y.toFixed(3)),
         },
         size: overlay.size,
+        trackId,
       },
     ]);
   });

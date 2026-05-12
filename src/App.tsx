@@ -119,6 +119,8 @@ type DragMode =
   | { startTextX: number; startTextY: number; startX: number; startY: number; textId: string; type: 'preview-text-move' }
   | { type: 'trim-end'; clipId: string }
   | { type: 'trim-start'; clipId: string }
+  | { type: 'text-trim-end'; textId: string }
+  | { type: 'text-trim-start'; textId: string }
   | null;
 
 type LoadedMetadata = {
@@ -597,11 +599,16 @@ function EditorWorkspace({
   const timelinePixelsPerSecond = TIMELINE_PIXELS_PER_SECOND * timelineZoom;
   const videoTracks = useMemo(() => getVideoTracksTopFirst(present), [present.tracks]);
   const audioTracks = useMemo(() => getAudioTracksTopFirst(present), [present.tracks]);
+  const textTracks = useMemo(
+    () => [...present.tracks].filter((track) => track.kind === 'text').sort((a, b) => b.index - a.index),
+    [present.tracks],
+  );
   const videoTracksHeight = videoTracks.length * (TIMELINE_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
   const audioTracksHeight = audioTracks.length * (TIMELINE_AUDIO_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
+  const textTracksHeight = textTracks.length * (TIMELINE_TEXT_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
   const audioTracksTop = TIMELINE_TRACK_TOP + videoTracksHeight;
-  const textTrackTop = audioTracksTop + audioTracksHeight;
-  const timelineContentHeight = textTrackTop + TIMELINE_TEXT_TRACK_HEIGHT + 24;
+  const textTracksTop = audioTracksTop + audioTracksHeight;
+  const timelineContentHeight = textTracksTop + Math.max(textTracksHeight, 0) + 24;
   const timelineWidth = Math.max(
     TIMELINE_MIN_WIDTH,
     getVirtualTimelineWidth(Math.ceil(duration || 1), timelineZoom),
@@ -955,6 +962,10 @@ function EditorWorkspace({
     }
 
     const start = clamp(getCurrentEditTime(), 0, Math.max(0, duration - 0.1));
+    const targetTextTrack =
+      (present.selectedTrackId && present.tracks.find((track) => track.id === present.selectedTrackId)?.kind === 'text'
+        ? present.selectedTrackId
+        : null) ?? present.tracks.find((track) => track.kind === 'text')?.id ?? '';
 
     dispatch({
       overlay: {
@@ -964,12 +975,13 @@ function EditorWorkspace({
         size: 34,
         start,
         text: 'Text',
+        trackId: targetTextTrack,
         x: 0.5,
         y: 0.18,
       },
       type: 'ADD_TEXT',
     });
-  }, [duration, getCurrentEditTime, hasTimeline]);
+  }, [duration, getCurrentEditTime, hasTimeline, present]);
 
   const deleteTrack = useCallback(
     (trackId: string) => {
@@ -1029,6 +1041,23 @@ function EditorWorkspace({
         locked: false,
         muted: false,
         name: `Audio ${index + 1}`,
+        visible: true,
+      },
+      type: 'ADD_TRACK',
+    });
+  }, [present]);
+
+  const addTextTrack = useCallback(() => {
+    const index = getNextTrackIndex(present, 'text');
+
+    dispatch({
+      track: {
+        id: createId('text'),
+        index,
+        kind: 'text',
+        locked: false,
+        muted: false,
+        name: `Text ${index + 1}`,
         visible: true,
       },
       type: 'ADD_TRACK',
@@ -1350,6 +1379,28 @@ function EditorWorkspace({
             type: 'TRIM_CLIP',
           });
         }
+      } else if (mode.type === 'text-trim-start' || mode.type === 'text-trim-end') {
+        const overlay = present.textOverlays.find((candidate) => candidate.id === mode.textId);
+
+        if (overlay) {
+          if (mode.type === 'text-trim-start') {
+            const nextStart = clamp(time, 0, overlay.end - 0.1);
+            dispatch({
+              patch: { start: nextStart },
+              record: false,
+              textId: overlay.id,
+              type: 'UPDATE_TEXT',
+            });
+          } else {
+            const nextEnd = clamp(time, overlay.start + 0.1, duration);
+            dispatch({
+              patch: { end: nextEnd },
+              record: false,
+              textId: overlay.id,
+              type: 'UPDATE_TEXT',
+            });
+          }
+        }
       }
 
       return time;
@@ -1401,6 +1452,17 @@ function EditorWorkspace({
       event.stopPropagation();
       dispatch({ clipId, type: 'SELECT_CLIP' });
       const mode: DragMode = { clipId, type: edge === 'start' ? 'trim-start' : 'trim-end' };
+      setDragMode(mode);
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [setDragMode],
+  );
+
+  const onTextTrimPointerDown = useCallback(
+    (event: PointerEvent<HTMLSpanElement>, textId: string, edge: 'start' | 'end') => {
+      event.stopPropagation();
+      dispatch({ textId, type: 'SELECT_TEXT' });
+      const mode: DragMode = { textId, type: edge === 'start' ? 'text-trim-start' : 'text-trim-end' };
       setDragMode(mode);
       event.currentTarget.setPointerCapture(event.pointerId);
     },
@@ -2694,6 +2756,16 @@ function EditorWorkspace({
                 >
                   <Volume2 size={14} />
                 </button>
+                <button
+                  aria-label="Add text track"
+                  className="icon-button small"
+                  onClick={addTextTrack}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  title="Add text track"
+                  type="button"
+                >
+                  <Type size={14} />
+                </button>
               </div>
               {Array.from({ length: Math.max(2, Math.ceil(duration / 5) + 1) }, (_, index) => (
                 <span key={index} style={{ left: `${TIMELINE_LABEL_WIDTH + index * 5 * timelinePixelsPerSecond}px` }}>
@@ -2864,33 +2936,78 @@ function EditorWorkspace({
               );
             })}
 
-            <div
-              className="text-track"
-              style={{ top: `${textTrackTop}px` }}
-            >
-              <div className="track-label text-label">
-                <strong>Text</strong>
-                <span>{present.textOverlays.length} overlays</span>
-              </div>
-              {present.textOverlays.map((overlay) => (
-                <button
-                  className={`text-chip${overlay.id === present.selectedTextId ? ' is-selected' : ''}`}
-                  key={overlay.id}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    dispatch({ textId: overlay.id, type: 'SELECT_TEXT' });
+            {textTracks.map((track, index) => {
+              const top = textTracksTop + index * (TIMELINE_TEXT_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
+              const trackOverlays = present.textOverlays.filter((overlay) => overlay.trackId === track.id);
+
+              return (
+                <div
+                  className={`text-track timeline-track-row${track.id === present.selectedTrackId ? ' is-selected' : ''}`}
+                  data-track-id={track.id}
+                  key={track.id}
+                  onPointerDown={(event) => {
+                    if (event.target === event.currentTarget) {
+                      dispatch({ trackId: track.id, type: 'SELECT_TRACK' });
+                    }
                   }}
-                  onPointerDown={(event) => onTimelineTextPointerDown(event, overlay)}
-                  style={{
-                    left: `${TIMELINE_LABEL_WIDTH + overlay.start * timelinePixelsPerSecond}px`,
-                    width: `${Math.max(60, (overlay.end - overlay.start) * timelinePixelsPerSecond)}px`,
-                  }}
-                  type="button"
+                  style={{ top: `${top}px`, height: `${TIMELINE_TEXT_TRACK_HEIGHT}px` }}
                 >
-                  {overlay.text}
-                </button>
-              ))}
-            </div>
+                  <div className="track-label-shell">
+                    <button
+                      className="track-label"
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        dispatch({ trackId: track.id, type: 'SELECT_TRACK' });
+                      }}
+                      type="button"
+                    >
+                      <strong>{track.name}</strong>
+                      <span>{trackOverlays.length} overlays</span>
+                    </button>
+                    <button
+                      aria-label={`Delete ${track.name}`}
+                      className="track-delete"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        deleteTrack(track.id);
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      title="Delete track"
+                      type="button"
+                    >
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
+                  {trackOverlays.map((overlay) => {
+                    const overlayDuration = Math.max(0.1, overlay.end - overlay.start);
+                    const left = TIMELINE_LABEL_WIDTH + overlay.start * timelinePixelsPerSecond;
+                    const width = Math.max(70, overlayDuration * timelinePixelsPerSecond);
+
+                    return (
+                      <button
+                        className={`timeline-clip timeline-clip-text${overlay.id === present.selectedTextId ? ' is-selected' : ''}`}
+                        key={overlay.id}
+                        onPointerDown={(event) => onTimelineTextPointerDown(event, overlay)}
+                        style={{ left: `${left}px`, width: `${width}px` }}
+                        type="button"
+                      >
+                        <span className="trim-handle left" onPointerDown={(event) => onTextTrimPointerDown(event, overlay.id, 'start')} />
+                        <span className="text-clip-glyph">
+                          <Type size={14} />
+                        </span>
+                        <span className="clip-label">
+                          <strong>{overlay.text || 'Text'}</strong>
+                          <small>
+                            {formatClock(overlay.start)} - {formatClock(overlay.end)}
+                          </small>
+                        </span>
+                        <span className="trim-handle right" onPointerDown={(event) => onTextTrimPointerDown(event, overlay.id, 'end')} />
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
             </div>
           </div>
           <aside aria-label="Audio level meter" className="timeline-audio-meter" title="Audio level meter">
@@ -3439,6 +3556,24 @@ function Inspector({
               onChange={(event) => dispatch({ patch: { text: event.target.value }, textId: selectedText.id, type: 'UPDATE_TEXT' })}
               value={selectedText.text}
             />
+          </label>
+          <label className="field">
+            <span>Track</span>
+            <select
+              onChange={(event) =>
+                dispatch({ patch: { trackId: event.target.value }, textId: selectedText.id, type: 'UPDATE_TEXT' })
+              }
+              value={selectedText.trackId}
+            >
+              {[...project.tracks]
+                .filter((track) => track.kind === 'text')
+                .sort((a, b) => b.index - a.index)
+                .map((track) => (
+                  <option key={track.id} value={track.id}>
+                    {track.name}
+                  </option>
+                ))}
+            </select>
           </label>
           <ControlNumber
             label="Timeline Start"

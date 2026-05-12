@@ -28,7 +28,7 @@ export type ProjectAsset = {
 export type TimelineTrack = {
   id: string;
   index: number;
-  kind: 'audio' | 'video';
+  kind: 'audio' | 'text' | 'video';
   locked: boolean;
   muted: boolean;
   name: string;
@@ -56,6 +56,8 @@ export type TimelineClip = {
   volume: number;
 };
 
+export const DEFAULT_TEXT_TRACK_ID = 'text-1';
+
 export type TextOverlay = {
   align: 'left' | 'center' | 'right';
   end: number;
@@ -63,6 +65,7 @@ export type TextOverlay = {
   size: number;
   start: number;
   text: string;
+  trackId: string;
   x: number;
   y: number;
 };
@@ -225,7 +228,8 @@ export function clampClipTransform(transform: Partial<ClipTransform> | undefined
 }
 
 export function normalizeTimelineTrack(track: Partial<TimelineTrack> | undefined, fallbackIndex = 0): TimelineTrack {
-  const kind = track?.kind === 'audio' ? 'audio' : 'video';
+  const kind: TimelineTrack['kind'] =
+    track?.kind === 'audio' ? 'audio' : track?.kind === 'text' ? 'text' : 'video';
   const index = Number.isFinite(track?.index) ? Math.max(0, Number(track?.index)) : fallbackIndex;
 
   return {
@@ -234,7 +238,9 @@ export function normalizeTimelineTrack(track: Partial<TimelineTrack> | undefined
     kind,
     locked: Boolean(track?.locked),
     muted: Boolean(track?.muted),
-    name: track?.name?.trim() || `${kind === 'video' ? 'Video' : 'Audio'} ${index + 1}`,
+    name:
+      track?.name?.trim() ||
+      `${kind === 'video' ? 'Video' : kind === 'audio' ? 'Audio' : 'Text'} ${index + 1}`,
     visible: track?.visible ?? true,
   };
 }
@@ -259,9 +265,11 @@ export function normalizeTimelineTracks(tracks: Partial<TimelineTrack>[] | undef
     deduped.push(createDefaultTracks()[0]);
   }
 
+  const kindOrder: Record<TimelineTrack['kind'], number> = { video: 0, audio: 1, text: 2 };
+
   return deduped.sort((a, b) => {
     if (a.kind !== b.kind) {
-      return a.kind === 'video' ? -1 : 1;
+      return kindOrder[a.kind] - kindOrder[b.kind];
     }
 
     return a.index - b.index;
@@ -404,7 +412,7 @@ function clampSourceTime(asset: ProjectAsset | null, value: number) {
   return Math.min(Math.max(value, 0), Math.max(asset?.duration ?? value, MIN_CLIP_DURATION));
 }
 
-function clampTextOverlay(overlay: TextOverlay, projectDuration: number): TextOverlay {
+function clampTextOverlay(overlay: TextOverlay, projectDuration: number, fallbackTrackId = DEFAULT_TEXT_TRACK_ID): TextOverlay {
   const start = Math.min(Math.max(overlay.start, 0), Math.max(0, projectDuration - MIN_CLIP_DURATION));
   const end = Math.min(Math.max(overlay.end, start + MIN_CLIP_DURATION), Math.max(projectDuration, start + MIN_CLIP_DURATION));
 
@@ -414,6 +422,7 @@ function clampTextOverlay(overlay: TextOverlay, projectDuration: number): TextOv
     size: Math.min(Math.max(overlay.size, 12), 96),
     start,
     text: overlay.text.slice(0, 180),
+    trackId: overlay.trackId || fallbackTrackId,
     x: Math.min(Math.max(overlay.x, 0.02), 0.98),
     y: Math.min(Math.max(overlay.y, 0.02), 0.98),
   };
@@ -687,17 +696,21 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
       );
       const tracks = project.tracks.filter((track) => track.id !== action.trackId);
       const clips = removeClipsWithRipple(project, dependentClipIds);
+      const textOverlays = project.textOverlays.filter((overlay) => overlay.trackId !== action.trackId);
       const selectedClipStillExists = clips.some((clip) => clip.id === project.selectedClipId);
+      const selectedTextStillExists = textOverlays.some((overlay) => overlay.id === project.selectedTextId);
       const nextSelectedTrackId =
         project.selectedTrackId === action.trackId
-          ? remainingVideoTracks[0]?.id ?? tracks.find((track) => track.kind === 'audio')?.id ?? null
+          ? remainingVideoTracks[0]?.id ?? tracks.find((track) => track.kind === 'audio')?.id ?? tracks.find((track) => track.kind === 'text')?.id ?? null
           : project.selectedTrackId;
 
       return {
         ...project,
         clips: sortClipsForRuntime(clips, tracks),
         selectedClipId: selectedClipStillExists ? project.selectedClipId : null,
+        selectedTextId: selectedTextStillExists ? project.selectedTextId : null,
         selectedTrackId: nextSelectedTrackId,
+        textOverlays,
         tracks,
       };
     }
@@ -909,13 +922,37 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
 
     case 'ADD_TEXT': {
       const projectDuration = Math.max(getProjectDuration(project), MIN_CLIP_DURATION);
-      const overlay = clampTextOverlay(action.overlay, projectDuration);
+      let tracks = project.tracks;
+      let trackId = action.overlay.trackId;
+      const existingTextTrack = tracks.find((track) => track.kind === 'text');
+
+      if (!trackId || !tracks.some((track) => track.id === trackId)) {
+        if (existingTextTrack) {
+          trackId = existingTextTrack.id;
+        } else {
+          const newTrack: TimelineTrack = {
+            id: DEFAULT_TEXT_TRACK_ID,
+            index: 0,
+            kind: 'text',
+            locked: false,
+            muted: false,
+            name: 'Text 1',
+            visible: true,
+          };
+          tracks = normalizeTimelineTracks([...tracks, newTrack]);
+          trackId = tracks.find((track) => track.kind === 'text')?.id ?? DEFAULT_TEXT_TRACK_ID;
+        }
+      }
+
+      const overlay = clampTextOverlay({ ...action.overlay, trackId }, projectDuration, trackId);
 
       return {
         ...project,
         selectedClipId: null,
         selectedTextId: overlay.id,
+        selectedTrackId: overlay.trackId,
         textOverlays: [...project.textOverlays, overlay],
+        tracks,
       };
     }
 

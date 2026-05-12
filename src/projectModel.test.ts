@@ -68,6 +68,7 @@ describe('project model', () => {
         size: 42,
         start: 1,
         text: 'Title',
+        trackId: 'text-1',
         x: 0.5,
         y: 0.2,
       },

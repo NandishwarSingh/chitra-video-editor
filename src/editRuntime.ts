@@ -71,6 +71,7 @@ export function executeEditPlan(plan: CompiledEditPlan, currentProject: ProjectP
         size: overlay.size,
         start: overlay.start,
         text: overlay.text,
+        trackId: overlay.trackId,
         x: overlay.x,
         y: overlay.y,
       })),

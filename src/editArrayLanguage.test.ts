@@ -66,6 +66,7 @@ function project(): ProjectPresent {
         size: 42,
         start: 0.5,
         text: 'THIS CHANGED EVERYTHING',
+        trackId: 'text-1',
         x: 0.5,
         y: 0.2,
       },
@@ -112,7 +113,8 @@ describe('Edit Array Language', () => {
       expect.objectContaining({
         at: '00:00:00.500',
         duration: '00:00:02.000',
-        layer: 'text:1',
+        layer: 'text:text-1',
+        trackId: 'text-1',
       }),
     ]);
   });

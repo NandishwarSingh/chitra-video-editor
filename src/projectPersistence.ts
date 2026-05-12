@@ -2,6 +2,7 @@ import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
 import { createEditArrayFromDocument, createEditArrayFromRuntime, stringifyEditArray, type EditArrayProgram } from './editArrayLanguage';
 import { createMediaFingerprint, createTypedMediaFile, detectMediaKind, inferMediaMimeType } from './mediaEngine';
 import {
+  DEFAULT_TEXT_TRACK_ID,
   createDefaultTracks,
   createInitialProject,
   idleJobStatus,
@@ -265,6 +266,30 @@ export async function hydrateProjectRecord(record: ProjectRecord): Promise<Hydra
   const clips = normalizeTimelineClips(record.document.clips, tracks).filter((clip) =>
     assets.some((asset) => asset.id === clip.assetId),
   );
+
+  // Legacy projects had a single implicit "text:1" row with no real track.
+  // If the saved document has text overlays but no text-kind track, create
+  // a default text track and pin all overlays to it.
+  let textTracks = tracks;
+  let textOverlays = record.document.textOverlays;
+  if (textOverlays.length > 0 && !textTracks.some((track) => track.kind === 'text')) {
+    const defaultTextTrack: TimelineTrack = {
+      id: DEFAULT_TEXT_TRACK_ID,
+      index: 0,
+      kind: 'text',
+      locked: false,
+      muted: false,
+      name: 'Text 1',
+      visible: true,
+    };
+    textTracks = normalizeTimelineTracks([...textTracks, defaultTextTrack]);
+  }
+  const fallbackTextTrackId =
+    textTracks.find((track) => track.kind === 'text')?.id ?? DEFAULT_TEXT_TRACK_ID;
+  textOverlays = textOverlays.map((overlay) => ({
+    ...overlay,
+    trackId: overlay.trackId || fallbackTextTrackId,
+  }));
   const recoveryMessage =
     missingAssetNames.length > 0
       ? `Missing embedded media for ${missingAssetNames.length} asset${missingAssetNames.length === 1 ? '' : 's'}; loaded what could be recovered.`
@@ -282,9 +307,9 @@ export async function hydrateProjectRecord(record: ProjectRecord): Promise<Hydra
         selectedAssetId: assets[0]?.id ?? null,
         selectedClipId: null,
         selectedTextId: null,
-        selectedTrackId: tracks[0]?.id ?? null,
-        textOverlays: record.document.textOverlays,
-        tracks,
+        selectedTrackId: textTracks[0]?.id ?? null,
+        textOverlays,
+        tracks: textTracks,
       },
     },
     objectUrls,

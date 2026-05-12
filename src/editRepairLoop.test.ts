@@ -57,6 +57,7 @@ function project(): ProjectPresent {
         size: 42,
         start: 0.5,
         text: 'Hook',
+        trackId: 'text-1',
         x: 0.99,
         y: 0.02,
       },

@@ -101,7 +101,7 @@ const checks = [
     typeName: 'TimelineTrack',
   }),
   createEditArrayCoverageCheck({
-    covered: ['id', 'text', 'start', 'end', 'x', 'y', 'size', 'align'],
+    covered: ['id', 'text', 'trackId', 'start', 'end', 'x', 'y', 'size', 'align'],
     file: 'src/projectModel.ts',
     omitted: [],
     typeName: 'TextOverlay',

@@ -36,7 +36,7 @@ export type EditArrayIrClip = TimelineClip & {
 };
 
 export type EditArrayIrTextOverlay = TextOverlay & {
-  layer: 'text:1';
+  layer: string;
 };
 
 export type EditArrayIrReservedOperation = {
@@ -335,14 +335,18 @@ export function compileEditArrayToIr(program: EditArrayProgram | readonly unknow
       const end = Math.max(start + 0.1, parseEditArrayTime(options.end) || start + parseEditArrayTime(options.duration));
       const align = options.align === 'left' || options.align === 'right' ? options.align : 'center';
 
+      const layer = stringValue(options.layer, 'text:text-1');
+      const trackId = stringValue(options.trackId, layer.replace(/^text:/, '')) || 'text-1';
+
       ir.textOverlays.push({
         align,
         end,
         id: stringValue(options.id, `text-${ir.textOverlays.length + 1}`),
-        layer: 'text:1',
+        layer,
         size: numberValue(options.size, 34),
         start,
         text,
+        trackId,
         x: numberValue(position.x, 0.5),
         y: numberValue(position.y, 0.18),
       });
