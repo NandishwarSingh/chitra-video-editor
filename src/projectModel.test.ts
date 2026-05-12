@@ -1,0 +1,182 @@
+import { describe, expect, it } from 'vitest';
+import {
+  createInitialProject,
+  getClipAtTime,
+  getClipDuration,
+  getFirstClipByTimelineOrder,
+  getNextClipAfter,
+  getProjectDuration,
+  idleJobStatus,
+  projectReducer,
+  type ProjectAsset,
+} from './projectModel';
+
+function asset(id: string, duration: number): ProjectAsset {
+  return {
+    duration,
+    file: new File(['video'], `${id}.mp4`, { type: 'video/mp4' }),
+    height: 1080,
+    id,
+    name: `${id}.mp4`,
+    originalUrl: `blob:${id}`,
+    playbackUrl: `blob:${id}`,
+    posterUrl: null,
+    proxyStatus: idleJobStatus,
+    proxyUrl: null,
+    size: 5,
+    type: 'video/mp4',
+    width: 1920,
+  };
+}
+
+function projectWithTwoClips() {
+  let state = createInitialProject();
+  state = projectReducer(state, { assets: [asset('a', 10), asset('b', 5)], type: 'ADD_ASSETS' });
+  state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+  state = projectReducer(state, { assetId: 'b', clipId: 'clip-b', type: 'ADD_ASSET_TO_TIMELINE' });
+
+  return state;
+}
+
+describe('project model', () => {
+  it('derives project duration from ordered clip durations', () => {
+    const state = projectWithTwoClips();
+
+    expect(getProjectDuration(state.present)).toBe(15);
+  });
+
+  it('splits the active clip at the playhead', () => {
+    let state = projectWithTwoClips();
+    state = projectReducer(state, { newClipId: 'clip-a-right', playhead: 4, type: 'SPLIT_CLIP' });
+
+    expect(state.present.clips.map((clip) => [clip.id, clip.timelineStart, clip.sourceIn, clip.sourceOut])).toEqual([
+      ['clip-a', 0, 0, 4],
+      ['clip-a-right', 4, 4, 10],
+      ['clip-b', 10, 0, 5],
+    ]);
+    expect(getProjectDuration(state.present)).toBe(15);
+  });
+
+  it('splits selected timeline text without splitting the active clip', () => {
+    let state = projectWithTwoClips();
+    state = projectReducer(state, {
+      overlay: {
+        align: 'center',
+        end: 5,
+        id: 'text-a',
+        size: 42,
+        start: 1,
+        text: 'Title',
+        x: 0.5,
+        y: 0.2,
+      },
+      type: 'ADD_TEXT',
+    });
+    state = projectReducer(state, { newTextId: 'text-b', playhead: 3, textId: 'text-a', type: 'SPLIT_TEXT' });
+
+    expect(state.present.textOverlays.map((overlay) => [overlay.id, overlay.start, overlay.end])).toEqual([
+      ['text-a', 1, 3],
+      ['text-b', 3, 5],
+    ]);
+    expect(state.present.clips.map((clip) => [clip.id, clip.sourceIn, clip.sourceOut])).toEqual([
+      ['clip-a', 0, 10],
+      ['clip-b', 0, 5],
+    ]);
+    expect(state.present.selectedClipId).toBeNull();
+    expect(state.present.selectedTextId).toBe('text-b');
+  });
+
+  it('clamps trim operations to a minimum clip duration', () => {
+    let state = projectWithTwoClips();
+    state = projectReducer(state, { clipId: 'clip-a', edge: 'end', sourceTime: 0.01, type: 'TRIM_CLIP' });
+
+    const clip = state.present.clips[0];
+    expect(getClipDuration(clip)).toBeCloseTo(0.1);
+  });
+
+  it('moves clips by timeline start', () => {
+    let state = projectWithTwoClips();
+    state = projectReducer(state, { clipId: 'clip-b', timelineStart: 2, type: 'MOVE_CLIP' });
+
+    expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(2);
+  });
+
+  it('deletes the selected clip and ripples later clips on that track', () => {
+    let state = projectWithTwoClips();
+    state = projectReducer(state, { clipId: 'clip-a', type: 'SELECT_CLIP' });
+    state = projectReducer(state, { type: 'DELETE_SELECTED' });
+
+    expect(state.present.clips.map((clip) => clip.id)).toEqual(['clip-b']);
+    expect(state.present.clips[0].timelineStart).toBe(0);
+    expect(state.present.selectedClipId).toBeNull();
+  });
+
+  it('deletes an asset from the media library and removes dependent clips', () => {
+    let state = projectWithTwoClips();
+    state = projectReducer(state, { clipId: 'clip-a', type: 'SELECT_CLIP' });
+    state = projectReducer(state, { assetId: 'a', type: 'DELETE_ASSET' });
+
+    expect(state.present.assets.map((candidate) => candidate.id)).toEqual(['b']);
+    expect(state.present.clips.map((clip) => clip.id)).toEqual(['clip-b']);
+    expect(state.present.clips[0].timelineStart).toBe(0);
+    expect(state.present.selectedClipId).toBeNull();
+  });
+
+  it('supports undo and redo for edit operations', () => {
+    let state = projectWithTwoClips();
+    state = projectReducer(state, { clipId: 'clip-b', timelineStart: 2, type: 'MOVE_CLIP' });
+
+    expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(2);
+
+    state = projectReducer(state, { type: 'UNDO' });
+    expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(10);
+
+    state = projectReducer(state, { type: 'REDO' });
+    expect(state.present.clips.find((clip) => clip.id === 'clip-b')?.timelineStart).toBe(2);
+  });
+
+  it('looks up the active clip from a global timeline time', () => {
+    const state = projectWithTwoClips();
+    const active = getClipAtTime(state.present, 12);
+
+    expect(active?.clip.id).toBe('clip-b');
+    expect(active?.localTime).toBe(2);
+  });
+
+  it('ripples downstream clips correctly when deleting an asset with multiple clips on one track', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 4), asset('b', 6)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a1', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, { assetId: 'b', clipId: 'clip-b', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a2', type: 'ADD_ASSET_TO_TIMELINE' });
+
+    expect(state.present.clips.map((clip) => [clip.id, clip.timelineStart])).toEqual([
+      ['clip-a1', 0],
+      ['clip-b', 4],
+      ['clip-a2', 10],
+    ]);
+
+    state = projectReducer(state, { assetId: 'a', type: 'DELETE_ASSET' });
+
+    expect(state.present.clips.map((clip) => [clip.id, clip.timelineStart])).toEqual([['clip-b', 0]]);
+  });
+
+  it('finds the earliest clip even when the timeline has a leading gap', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 10)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', timelineStart: 3, type: 'ADD_ASSET_TO_TIMELINE' });
+
+    expect(getFirstClipByTimelineOrder(state.present)?.id).toBe('clip-a');
+    expect(getFirstClipByTimelineOrder(state.present)?.timelineStart).toBe(3);
+  });
+
+  it('finds the next clip after a gap and returns null past the end', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 4), asset('b', 4)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, { assetId: 'b', clipId: 'clip-b', timelineStart: 10, type: 'ADD_ASSET_TO_TIMELINE' });
+
+    expect(getNextClipAfter(state.present, 4)?.id).toBe('clip-b');
+    expect(getNextClipAfter(state.present, 100)).toBeNull();
+  });
+});
