@@ -13,6 +13,12 @@ export type TimelineThumbnail = {
 const THUMBNAIL_WIDTH = 168;
 const MAX_THUMBNAILS = 120;
 
+// When the same asset (fingerprint) is referenced by multiple clips on the
+// timeline, only the first clip's hook should run the seek/encode pass.
+// Subsequent hooks await the in-flight generation and then read from the
+// (now populated) IndexedDB cache.
+const inflightGenerationByFingerprint = new Map<string, Promise<void>>();
+
 export type UseVideoThumbnailOptions = {
   priorityIndexes?: number[];
 };
@@ -187,9 +193,27 @@ export function useVideoThumbnails(
     const times = createThumbnailTimes(duration);
     performanceMonitor.setThumbnailQueue(times.length);
 
-    async function generate() {
-      setIsGenerating(true);
+    const width = THUMBNAIL_WIDTH;
 
+    async function consumeFromCache(): Promise<Array<TimelineThumbnail | null> | null> {
+      const cachedBlobs = await Promise.all(
+        times.map((time) => getCachedThumbnail(createThumbnailCacheKey(mediaFingerprint, time, width))),
+      );
+
+      if (cachedBlobs.some((blob) => !blob)) {
+        return null;
+      }
+
+      const built: Array<TimelineThumbnail | null> = cachedBlobs.map((blob, index) => {
+        const src = URL.createObjectURL(blob as Blob);
+        nextObjectUrls.push(src);
+        return { index, src, time: times[index] };
+      });
+
+      return built;
+    }
+
+    async function runFullGeneration() {
       video.src = url;
       video.muted = true;
       video.preload = 'metadata';
@@ -204,7 +228,6 @@ export function useVideoThumbnails(
       }
 
       const aspectRatio = video.videoWidth > 0 && video.videoHeight > 0 ? video.videoWidth / video.videoHeight : 16 / 9;
-      const width = THUMBNAIL_WIDTH;
       const height = Math.round(THUMBNAIL_WIDTH / aspectRatio);
       const nextThumbnails: Array<TimelineThumbnail | null> = Array.from({ length: times.length }, () => null);
       const order = createPriorityThumbnailOrder(times.length, priorityIndexesRef.current);
@@ -254,6 +277,50 @@ export function useVideoThumbnails(
         if (completed <= 2 || completed % 3 === 0 || completed === times.length) {
           setThumbnails([...nextThumbnails]);
           await waitForIdle();
+        }
+      }
+    }
+
+    async function generate() {
+      setIsGenerating(true);
+
+      // Wait for any other in-flight generation for this fingerprint so the
+      // IDB cache is populated. This avoids duplicate seek/encode passes when
+      // many clips share the same asset.
+      const inflight = inflightGenerationByFingerprint.get(mediaFingerprint);
+      if (inflight) {
+        try {
+          await inflight;
+        } catch {
+          // primary generator failed — fall through and try our own path
+        }
+      }
+
+      if (cancelled) {
+        return;
+      }
+
+      // Best case: every thumbnail is already cached → no video decode pass.
+      const cached = await consumeFromCache();
+      if (cancelled) {
+        return;
+      }
+      if (cached) {
+        setThumbnails(cached);
+        performanceMonitor.markThumbnailComplete(cached.length);
+        setIsGenerating(false);
+        return;
+      }
+
+      // No prior cache. Run the full pass and register so concurrent hooks
+      // know to wait.
+      const generation = runFullGeneration();
+      inflightGenerationByFingerprint.set(mediaFingerprint, generation);
+      try {
+        await generation;
+      } finally {
+        if (inflightGenerationByFingerprint.get(mediaFingerprint) === generation) {
+          inflightGenerationByFingerprint.delete(mediaFingerprint);
         }
       }
 

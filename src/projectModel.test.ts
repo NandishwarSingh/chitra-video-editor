@@ -33,6 +33,25 @@ function asset(id: string, duration: number): ProjectAsset {
   };
 }
 
+function audioAsset(id: string, duration: number): ProjectAsset {
+  return {
+    duration,
+    file: new File(['audio'], `${id}.mp3`, { type: 'audio/mpeg' }),
+    height: 0,
+    id,
+    kind: 'audio',
+    name: `${id}.mp3`,
+    originalUrl: `blob:${id}`,
+    playbackUrl: `blob:${id}`,
+    posterUrl: null,
+    proxyStatus: idleJobStatus,
+    proxyUrl: null,
+    size: 5,
+    type: 'audio/mpeg',
+    width: 0,
+  };
+}
+
 function projectWithTwoClips() {
   let state = createInitialProject();
   state = projectReducer(state, { assets: [asset('a', 10), asset('b', 5)], type: 'ADD_ASSETS' });
@@ -59,6 +78,51 @@ describe('project model', () => {
       ['clip-b', 10, 0, 5],
     ]);
     expect(getProjectDuration(state.present)).toBe(15);
+  });
+
+  it('splits the targeted clip when SPLIT_CLIP has a clipId, even if a video clip overlaps the playhead', () => {
+    let state = createInitialProject();
+    const videoTrackId = state.present.tracks.find((track) => track.kind === 'video')!.id;
+    state = projectReducer(state, {
+      track: { id: 'audio-1', index: 0, kind: 'audio', locked: false, muted: false, name: 'Audio 1', visible: true },
+      type: 'ADD_TRACK',
+    });
+    state = projectReducer(state, { assets: [asset('v', 10), audioAsset('a', 10)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'v', clipId: 'clip-v', timelineStart: 0, trackId: videoTrackId, type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', timelineStart: 0, trackId: 'audio-1', type: 'ADD_ASSET_TO_TIMELINE' });
+
+    state = projectReducer(state, { clipId: 'clip-a', newClipId: 'clip-a-right', playhead: 4, type: 'SPLIT_CLIP' });
+
+    expect(state.present.clips.filter((c) => c.trackId === 'audio-1').map((c) => [c.id, c.sourceIn, c.sourceOut])).toEqual([
+      ['clip-a', 0, 4],
+      ['clip-a-right', 4, 10],
+    ]);
+    expect(state.present.clips.filter((c) => c.trackId !== 'audio-1').map((c) => c.id)).toEqual(['clip-v']);
+  });
+
+  it('does nothing when SPLIT_CLIP clipId is set but the playhead is outside that clip', () => {
+    let state = projectWithTwoClips();
+    const before = state.present.clips;
+    state = projectReducer(state, { clipId: 'clip-a', newClipId: 'clip-a-right', playhead: 50, type: 'SPLIT_CLIP' });
+    expect(state.present.clips).toBe(before);
+  });
+
+  it('moves a text overlay to another text track when UPDATE_TEXT includes trackId', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 10)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, {
+      overlay: { align: 'center', end: 4, id: 'text-1', size: 32, start: 1, text: 'Hi', trackId: 'text-1', x: 0.5, y: 0.2 },
+      type: 'ADD_TEXT',
+    });
+    state = projectReducer(state, {
+      track: { id: 'text-2', index: 1, kind: 'text', locked: false, muted: false, name: 'Text 2', visible: true },
+      type: 'ADD_TRACK',
+    });
+
+    state = projectReducer(state, { patch: { trackId: 'text-2' }, textId: 'text-1', type: 'UPDATE_TEXT' });
+
+    expect(state.present.textOverlays[0].trackId).toBe('text-2');
   });
 
   it('splits selected timeline text without splitting the active clip', () => {

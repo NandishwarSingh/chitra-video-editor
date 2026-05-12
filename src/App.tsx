@@ -57,6 +57,7 @@ import {
 import { performanceMonitor, usePerformanceSnapshot } from './performanceMonitor';
 import { usePreviewCompositor } from './previewCompositor';
 import {
+  DEFAULT_TEXT_TRACK_ID,
   collectSnapTargets,
   getActiveTextOverlays,
   getAssetById,
@@ -117,7 +118,7 @@ type DragMode =
   | { type: 'playhead'; wasPlaying: boolean }
   | { clipId: string; startTransform: ClipTransform; startX: number; startY: number; type: 'preview-clip-move' }
   | { clipId: string; startScale: number; startX: number; type: 'preview-clip-scale' }
-  | { startEnd: number; startStart: number; startX: number; textId: string; type: 'timeline-text-move' }
+  | { startEnd: number; startStart: number; startTrackId: string; startX: number; startY: number; textId: string; type: 'timeline-text-move' }
   | { startSize: number; startX: number; textId: string; type: 'preview-text-scale' }
   | { startTextX: number; startTextY: number; startX: number; startY: number; textId: string; type: 'preview-text-move' }
   | { type: 'trim-end'; clipId: string }
@@ -219,6 +220,14 @@ function createAsset(file: File): ProjectAsset {
     type: mediaFile.type,
     width: 0,
   };
+}
+
+function isClipTransformFullScreen(transform: ClipTransform): boolean {
+  return (
+    Math.abs(transform.x - 0.5) < 0.01 &&
+    Math.abs(transform.y - 0.5) < 0.01 &&
+    transform.scale >= 0.999
+  );
 }
 
 function loadVideoMetadata(url: string): Promise<LoadedMetadata> {
@@ -395,7 +404,26 @@ function PreviewLayerVideo({ asset, clip, isPlaying, localTime, playbackRate, st
     }
   }, [clip.sourceIn, isPlaying, localTime, playbackRate]);
 
-  return <video className="preview-layer-video" playsInline preload="auto" ref={layerVideoRef} src={asset.playbackUrl} style={style} />;
+  useEffect(() => {
+    // Release the decoder when this layer unmounts. Without this, browsers
+    // (especially Safari) keep the H.264 decoder warm long after the element
+    // is gone, eating memory and decoder slots.
+    const video = layerVideoRef.current;
+    return () => {
+      if (!video) {
+        return;
+      }
+      try {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      } catch {
+        // best effort; if the element is already detached, ignore
+      }
+    };
+  }, []);
+
+  return <video className="preview-layer-video" playsInline preload="metadata" ref={layerVideoRef} src={asset.playbackUrl} style={style} />;
 }
 
 type PreviewLayerAudioProps = {
@@ -555,6 +583,8 @@ function EditorWorkspace({
   const savedRecordRef = useRef(record);
   const allowEmptyProjectSaveRef = useRef(false);
   const dragModeRef = useRef<DragMode>(null);
+  const pendingDragActionRef = useRef<Parameters<typeof projectReducer>[1] | null>(null);
+  const dragRafIdRef = useRef<number | null>(null);
 
   const [project, dispatch] = useReducer(projectReducer, hydratedProject.history, (value) => value);
   const [exportStatus, setExportStatus] = useState<JobStatus>(idleJobStatus);
@@ -745,6 +775,38 @@ function EditorWorkspace({
 
   const setDragMode = useCallback((mode: DragMode) => {
     dragModeRef.current = mode;
+  }, []);
+
+  // Coalesces drag-time dispatches (MOVE_CLIP, UPDATE_TEXT, TRIM_CLIP) so a
+  // 144 Hz pointer stream produces at most one reducer pass per animation
+  // frame. Only the latest action survives — earlier ones reflect stale
+  // positions anyway.
+  const flushPendingDragAction = useCallback(() => {
+    dragRafIdRef.current = null;
+    const pending = pendingDragActionRef.current;
+    pendingDragActionRef.current = null;
+    if (pending) {
+      dispatch(pending);
+    }
+  }, []);
+
+  const dispatchDragAction = useCallback(
+    (action: Parameters<typeof projectReducer>[1]) => {
+      pendingDragActionRef.current = action;
+      if (dragRafIdRef.current !== null) {
+        return;
+      }
+      dragRafIdRef.current = window.requestAnimationFrame(flushPendingDragAction);
+    },
+    [flushPendingDragAction],
+  );
+
+  const cancelPendingDragAction = useCallback(() => {
+    if (dragRafIdRef.current !== null) {
+      window.cancelAnimationFrame(dragRafIdRef.current);
+      dragRafIdRef.current = null;
+    }
+    pendingDragActionRef.current = null;
   }, []);
 
   const hideSnapIndicator = useCallback(() => {
@@ -983,12 +1045,14 @@ function EditorWorkspace({
   );
 
   const getTimelineTrackIdFromClientY = useCallback(
-    (clientY: number, assetKind: 'audio' | 'video' = 'video') => {
+    (clientY: number, assetKind: 'audio' | 'text' | 'video' = 'video') => {
       const rect = timelineRef.current?.getBoundingClientRect();
       const fallbackId =
         assetKind === 'audio'
           ? getDefaultAudioTrackId(present) ?? present.selectedTrackId ?? getDefaultVideoTrackId(present)
-          : present.selectedTrackId ?? getDefaultVideoTrackId(present);
+          : assetKind === 'text'
+            ? textTracks[0]?.id ?? present.tracks.find((track) => track.kind === 'text')?.id ?? DEFAULT_TEXT_TRACK_ID
+            : present.selectedTrackId ?? getDefaultVideoTrackId(present);
 
       if (!rect) {
         return fallbackId;
@@ -1008,6 +1072,18 @@ function EditorWorkspace({
         return audioTracks[audioIndex]?.id ?? fallbackId;
       }
 
+      if (assetKind === 'text') {
+        if (textTracks.length === 0) {
+          return fallbackId;
+        }
+        const textIndex = clamp(
+          Math.floor((y - textTracksTop) / (TIMELINE_TEXT_TRACK_HEIGHT + TIMELINE_TRACK_GAP)),
+          0,
+          Math.max(0, textTracks.length - 1),
+        );
+        return textTracks[textIndex]?.id ?? fallbackId;
+      }
+
       if (videoTracks.length === 0) {
         return fallbackId;
       }
@@ -1020,7 +1096,7 @@ function EditorWorkspace({
 
       return videoTracks[index]?.id ?? fallbackId;
     },
-    [audioTracks, audioTracksTop, present, videoTracks],
+    [audioTracks, audioTracksTop, present, textTracks, textTracksTop, videoTracks],
   );
 
   const addTextOverlay = useCallback(() => {
@@ -1141,7 +1217,7 @@ function EditorWorkspace({
       }
 
       if (mode.type === 'preview-text-move') {
-        dispatch({
+        dispatchDragAction({
           patch: {
             x: clamp(mode.startTextX + (event.clientX - mode.startX) / rect.width, 0.02, 0.98),
             y: clamp(mode.startTextY + (event.clientY - mode.startY) / rect.height, 0.02, 0.98),
@@ -1154,7 +1230,7 @@ function EditorWorkspace({
       }
 
       if (mode.type === 'preview-text-scale') {
-        dispatch({
+        dispatchDragAction({
           patch: {
             size: clamp(mode.startSize + (event.clientX - mode.startX) * 0.3, 12, 96),
           },
@@ -1166,7 +1242,7 @@ function EditorWorkspace({
       }
 
       if (mode.type === 'preview-clip-move') {
-        dispatch({
+        dispatchDragAction({
           clipId: mode.clipId,
           record: false,
           transform: {
@@ -1179,7 +1255,7 @@ function EditorWorkspace({
       }
 
       if (mode.type === 'preview-clip-scale') {
-        dispatch({
+        dispatchDragAction({
           clipId: mode.clipId,
           record: false,
           transform: {
@@ -1189,7 +1265,7 @@ function EditorWorkspace({
         });
       }
     },
-    [],
+    [dispatchDragAction],
   );
 
   const endPreviewDirectManipulation = useCallback(() => {
@@ -1201,6 +1277,17 @@ function EditorWorkspace({
       mode?.type === 'preview-clip-move' ||
       mode?.type === 'preview-clip-scale'
     ) {
+      // Flush any throttled drag dispatch before we drop the drag mode so the
+      // last position actually lands in the reducer.
+      if (dragRafIdRef.current !== null) {
+        window.cancelAnimationFrame(dragRafIdRef.current);
+        dragRafIdRef.current = null;
+        const pending = pendingDragActionRef.current;
+        pendingDragActionRef.current = null;
+        if (pending) {
+          dispatch(pending);
+        }
+      }
       setDragMode(null);
     }
   }, [setDragMode]);
@@ -1217,8 +1304,21 @@ function EditorWorkspace({
       return;
     }
 
+    if (selectedClip) {
+      const clipEnd = getClipEnd(selectedClip);
+      if (editTime > selectedClip.timelineStart && editTime < clipEnd) {
+        dispatch({
+          clipId: selectedClip.id,
+          newClipId: createId('clip'),
+          playhead: editTime,
+          type: 'SPLIT_CLIP',
+        });
+        return;
+      }
+    }
+
     dispatch({ newClipId: createId('clip'), playhead: editTime, type: 'SPLIT_CLIP' });
-  }, [getCurrentEditTime, hasTimeline, selectedText]);
+  }, [getCurrentEditTime, hasTimeline, selectedClip, selectedText]);
 
   const deleteSelected = useCallback(() => {
     dispatch({ type: 'DELETE_SELECTED' });
@@ -1420,7 +1520,7 @@ function EditorWorkspace({
             excludeClipId: mode.clipId,
             includeOtherEdge: rawStart + clipDuration,
           });
-          dispatch({
+          dispatchDragAction({
             clipId: mode.clipId,
             record: false,
             timelineStart: snappedStart,
@@ -1429,24 +1529,27 @@ function EditorWorkspace({
           });
         }
       } else if (mode.type === 'timeline-text-move') {
-        const overlayDuration = Math.max(0.1, mode.startEnd - mode.startStart);
-        const deltaSeconds = (event.clientX - mode.startX) / timelinePixelsPerSecond;
-        const rawStart = clamp(mode.startStart + deltaSeconds, 0, Math.max(0, duration - overlayDuration));
-        const nextStart = resolveSnap(rawStart, {
-          event,
-          excludeTextId: mode.textId,
-          includeOtherEdge: rawStart + overlayDuration,
-        });
+        if (isClipReorderDrag(mode.startX, mode.startY, event.clientX, event.clientY, CLIP_REORDER_DRAG_THRESHOLD_PX)) {
+          const overlayDuration = Math.max(0.1, mode.startEnd - mode.startStart);
+          const deltaSeconds = (event.clientX - mode.startX) / timelinePixelsPerSecond;
+          const rawStart = clamp(mode.startStart + deltaSeconds, 0, Math.max(0, duration - overlayDuration));
+          const nextStart = resolveSnap(rawStart, {
+            event,
+            excludeTextId: mode.textId,
+            includeOtherEdge: rawStart + overlayDuration,
+          });
 
-        dispatch({
-          patch: {
-            end: nextStart + overlayDuration,
-            start: nextStart,
-          },
-          record: false,
-          textId: mode.textId,
-          type: 'UPDATE_TEXT',
-        });
+          dispatchDragAction({
+            patch: {
+              end: nextStart + overlayDuration,
+              start: nextStart,
+              trackId: getTimelineTrackIdFromClientY(event.clientY, 'text'),
+            },
+            record: false,
+            textId: mode.textId,
+            type: 'UPDATE_TEXT',
+          });
+        }
       } else if (mode.type === 'trim-start' || mode.type === 'trim-end') {
         const clip = present.clips.find((candidate) => candidate.id === mode.clipId);
 
@@ -1459,7 +1562,7 @@ function EditorWorkspace({
             includeOtherEdge: otherEdge,
           });
           const sourceTime = clip.sourceIn + (snappedTime - clip.timelineStart);
-          dispatch({
+          dispatchDragAction({
             clipId: clip.id,
             edge: mode.type === 'trim-start' ? 'start' : 'end',
             sourceTime,
@@ -1477,7 +1580,7 @@ function EditorWorkspace({
               excludeTextId: overlay.id,
               includeOtherEdge: overlay.end,
             });
-            dispatch({
+            dispatchDragAction({
               patch: { start: nextStart },
               record: false,
               textId: overlay.id,
@@ -1490,7 +1593,7 @@ function EditorWorkspace({
               excludeTextId: overlay.id,
               includeOtherEdge: overlay.start,
             });
-            dispatch({
+            dispatchDragAction({
               patch: { end: nextEnd },
               record: false,
               textId: overlay.id,
@@ -1502,7 +1605,7 @@ function EditorWorkspace({
 
       return time;
     },
-    [applyVisualTime, duration, getTimelineTimeFromClientX, getTimelineTrackIdFromClientY, present, resolveSnap, timelinePixelsPerSecond, timelineTimeToVideoTime],
+    [applyVisualTime, dispatchDragAction, duration, getTimelineTimeFromClientX, getTimelineTrackIdFromClientY, present, resolveSnap, timelinePixelsPerSecond, timelineTimeToVideoTime],
   );
 
   const onTimelinePointerDown = useCallback(
@@ -1573,7 +1676,9 @@ function EditorWorkspace({
       setDragMode({
         startEnd: overlay.end,
         startStart: overlay.start,
+        startTrackId: overlay.trackId,
         startX: event.clientX,
+        startY: event.clientY,
         textId: overlay.id,
         type: 'timeline-text-move',
       });
@@ -1670,6 +1775,10 @@ function EditorWorkspace({
       const mode = dragModeRef.current;
       const time = updateFromPointer(event, mode);
 
+      // Discard any throttled drag dispatch — the pointerup dispatch below
+      // carries the final snapped value and is the one that records history.
+      cancelPendingDragAction();
+
       if (mode?.type === 'clip-move' && time !== null) {
         if (!isClipReorderDrag(mode.startX, mode.startY, event.clientX, event.clientY, CLIP_REORDER_DRAG_THRESHOLD_PX)) {
           setDragMode(null);
@@ -1697,7 +1806,7 @@ function EditorWorkspace({
       }
 
       if (mode?.type === 'timeline-text-move') {
-        if (!isClipReorderDrag(mode.startX, 0, event.clientX, 0, CLIP_REORDER_DRAG_THRESHOLD_PX)) {
+        if (!isClipReorderDrag(mode.startX, mode.startY, event.clientX, event.clientY, CLIP_REORDER_DRAG_THRESHOLD_PX)) {
           setDragMode(null);
           hideSnapIndicator();
           return;
@@ -1716,6 +1825,7 @@ function EditorWorkspace({
           patch: {
             end: nextStart + overlayDuration,
             start: nextStart,
+            trackId: getTimelineTrackIdFromClientY(event.clientY, 'text'),
           },
           textId: mode.textId,
           type: 'UPDATE_TEXT',
@@ -1730,7 +1840,7 @@ function EditorWorkspace({
       setDragMode(null);
       markSeekEnd();
     },
-    [duration, getTimelineTrackIdFromClientY, hideSnapIndicator, markSeekEnd, playPlayback, present, resolveSnap, setDragMode, timelinePixelsPerSecond, updateFromPointer],
+    [cancelPendingDragAction, duration, getTimelineTrackIdFromClientY, hideSnapIndicator, markSeekEnd, playPlayback, present, resolveSnap, setDragMode, timelinePixelsPerSecond, updateFromPointer],
   );
 
   const onAssetDragStart = useCallback((event: ReactDragEvent<HTMLDivElement>, asset: ProjectAsset) => {
@@ -2086,6 +2196,14 @@ function EditorWorkspace({
     let peakDb = AUDIO_METER_FLOOR_DB;
 
     const tick = () => {
+      // Pause the meter while the tab is hidden — the analyser samples 30+
+      // times a second and the work is invisible anyway. Resume on
+      // 'visibilitychange'.
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        animationFrame = window.requestAnimationFrame(() => tick());
+        return;
+      }
+
       const analyser = audioAnalyserRef.current;
       const data = audioMeterDataRef.current;
       let meterPos = 0;
@@ -2217,6 +2335,11 @@ function EditorWorkspace({
 
     return () => {
       exportJobCancelRef.current?.();
+      if (dragRafIdRef.current !== null) {
+        window.cancelAnimationFrame(dragRafIdRef.current);
+        dragRafIdRef.current = null;
+      }
+      pendingDragActionRef.current = null;
       const urlsToRevoke = [...objectUrlsRef.current];
 
       if (revokeObjectUrlsTimerRef.current !== null) {
@@ -2595,23 +2718,28 @@ function EditorWorkspace({
                 ref={previewFrameRef}
                 style={previewFrameStyle}
               >
-                {activeLayerTimelines
-                  .filter((timeline) => timeline.clip.id !== activeClip?.id)
-                  .map((timeline) => {
-                    const layerAsset = getClipAsset(present, timeline.clip);
+                {/* Skip layer videos entirely when the topmost active clip covers the canvas
+                    (default 1:1 transform). With opaque video clips, anything below is fully
+                    occluded — mounting their <video> elements just allocates idle decoders. */}
+                {activeClip && !isClipTransformFullScreen(activeClip.transform)
+                  ? activeLayerTimelines
+                      .filter((timeline) => timeline.clip.id !== activeClip.id)
+                      .map((timeline) => {
+                        const layerAsset = getClipAsset(present, timeline.clip);
 
-                    return layerAsset ? (
-                      <PreviewLayerVideo
-                        asset={layerAsset}
-                        clip={timeline.clip}
-                        isPlaying={isPlaying}
-                        key={timeline.clip.id}
-                        localTime={timeline.localTime}
-                        playbackRate={playbackRate}
-                        style={getClipTransformStyle(timeline.clip)}
-                      />
-                    ) : null;
-                  })}
+                        return layerAsset ? (
+                          <PreviewLayerVideo
+                            asset={layerAsset}
+                            clip={timeline.clip}
+                            isPlaying={isPlaying}
+                            key={timeline.clip.id}
+                            localTime={timeline.localTime}
+                            playbackRate={playbackRate}
+                            style={getClipTransformStyle(timeline.clip)}
+                          />
+                        ) : null;
+                      })
+                  : null}
                 {activeAudioLayerTimelines
                   .filter((timeline) => !(activePrimaryKind === 'audio' && timeline.clip.id === activeTimeline?.clip.id))
                   .map((timeline) => {

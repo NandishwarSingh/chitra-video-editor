@@ -234,11 +234,29 @@ export function usePreviewCompositor({ canvasRef, effects, enabled, videoRef }: 
       render();
 
       const scheduleRaf = () => {
-        render();
-        rafId = requestAnimationFrame(scheduleRaf);
+        if (cancelled) {
+          return;
+        }
+        if (!video.paused) {
+          render();
+          rafId = requestAnimationFrame(scheduleRaf);
+        } else {
+          rafId = null;
+        }
       };
 
+      const startRafIfNeeded = () => {
+        if (rafId === null && !cancelled) {
+          rafId = requestAnimationFrame(scheduleRaf);
+        }
+      };
+
+      let onPlay: (() => void) | null = null;
+      let onPause: (() => void) | null = null;
+
       if (video.requestVideoFrameCallback) {
+        // requestVideoFrameCallback already fires only when a new frame is
+        // composited, so there's nothing to gate by play/pause here.
         const onVideoFrame: VideoFrameRequestCallback = () => {
           render();
           videoFrameId = video.requestVideoFrameCallback?.(onVideoFrame) ?? null;
@@ -246,7 +264,22 @@ export function usePreviewCompositor({ canvasRef, effects, enabled, videoRef }: 
 
         videoFrameId = video.requestVideoFrameCallback(onVideoFrame);
       } else {
-        rafId = requestAnimationFrame(scheduleRaf);
+        // Browsers without rVFC fall back to a rAF loop. Stop the loop while
+        // paused so we don't keep re-uploading the same frame to the GPU.
+        if (!video.paused) {
+          rafId = requestAnimationFrame(scheduleRaf);
+        }
+        onPlay = () => startRafIfNeeded();
+        onPause = () => {
+          if (rafId !== null) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+          }
+          // One last render so the last frame stays visible while paused.
+          render();
+        };
+        video.addEventListener('play', onPlay);
+        video.addEventListener('pause', onPause);
       }
 
       video.addEventListener('seeked', render);
@@ -262,6 +295,8 @@ export function usePreviewCompositor({ canvasRef, effects, enabled, videoRef }: 
         video.removeEventListener('seeked', render);
         video.removeEventListener('loadeddata', render);
         window.removeEventListener('resize', render);
+        if (onPlay) video.removeEventListener('play', onPlay);
+        if (onPause) video.removeEventListener('pause', onPause);
         resizeObserver?.disconnect();
       };
     }

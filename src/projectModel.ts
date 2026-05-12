@@ -98,7 +98,7 @@ export type ProjectAction =
   | { trackId: string; type: 'DELETE_TRACK' }
   | { trackId: string | null; type: 'SELECT_TRACK' }
   | { clipId: string | null; type: 'SELECT_CLIP' }
-  | { playhead: number; newClipId: string; type: 'SPLIT_CLIP' }
+  | { clipId?: string; playhead: number; newClipId: string; type: 'SPLIT_CLIP' }
   | { playhead: number; newTextId: string; textId?: string; type: 'SPLIT_TEXT' }
   | { clipId: string; edge: 'start' | 'end'; sourceTime: number; type: 'TRIM_CLIP' }
   | { clipId: string; record?: boolean; timelineStart?: number; trackId?: string; type: 'MOVE_CLIP' }
@@ -808,7 +808,31 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
     }
 
     case 'SPLIT_CLIP': {
-      const active = getClipAtTime(project, action.playhead);
+      let active: { clip: TimelineClip; clipEnd: number; clipStart: number; localTime: number } | null;
+
+      if (action.clipId) {
+        const target = project.clips.find((clip) => clip.id === action.clipId) ?? null;
+
+        if (!target) {
+          return project;
+        }
+
+        const targetDuration = getClipDuration(target);
+        const localTime = action.playhead - target.timelineStart;
+
+        if (localTime <= 0 || localTime >= targetDuration) {
+          return project;
+        }
+
+        active = {
+          clip: target,
+          clipEnd: target.timelineStart + targetDuration,
+          clipStart: target.timelineStart,
+          localTime,
+        };
+      } else {
+        active = getClipAtTime(project, action.playhead);
+      }
 
       if (!active) {
         return project;
