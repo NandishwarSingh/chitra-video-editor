@@ -504,12 +504,14 @@ export function getFirstClipByTimelineOrder(project: ProjectPresent): TimelineCl
 }
 
 export function getNextClipAfter(project: ProjectPresent, time: number): TimelineClip | null {
-  const visibleTrackIndexById = new Map(
-    project.tracks.filter((track) => track.kind === 'video' && track.visible).map((track) => [track.id, track.index]),
+  const audibleTrackIndexById = new Map(
+    project.tracks
+      .filter((track) => (track.kind === 'video' ? track.visible : !track.muted))
+      .map((track) => [track.id, track.index]),
   );
 
   const candidates = project.clips.filter(
-    (clip) => visibleTrackIndexById.has(clip.trackId) && clip.timelineStart > time + 0.01,
+    (clip) => audibleTrackIndexById.has(clip.trackId) && clip.timelineStart > time + 0.01,
   );
 
   if (candidates.length === 0) {
@@ -519,7 +521,7 @@ export function getNextClipAfter(project: ProjectPresent, time: number): Timelin
   return candidates.sort(
     (a, b) =>
       a.timelineStart - b.timelineStart ||
-      (visibleTrackIndexById.get(a.trackId) ?? 0) - (visibleTrackIndexById.get(b.trackId) ?? 0) ||
+      (audibleTrackIndexById.get(a.trackId) ?? 0) - (audibleTrackIndexById.get(b.trackId) ?? 0) ||
       a.id.localeCompare(b.id),
   )[0];
 }

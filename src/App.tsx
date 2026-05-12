@@ -1651,9 +1651,10 @@ function EditorWorkspace({
     }
 
     if (media.currentTime >= active.sourceOut - 0.025) {
+      const audioStillActive = getAudioClipsAtTime(present, active.clipEnd).length > 0;
       const nextClip = getNextClipAfter(present, active.clipEnd);
 
-      if (!nextClip || active.clipEnd >= duration - 0.025) {
+      if (!audioStillActive && (!nextClip || active.clipEnd >= duration - 0.025)) {
         media.pause();
         applyVisualTime(duration);
         setPlayhead(duration);
@@ -1661,8 +1662,11 @@ function EditorWorkspace({
         return;
       }
 
-      // Skip past any gap between this clip and the next clip on a visible track.
-      const nextTime = Math.max(active.clipEnd, nextClip.timelineStart);
+      // Audio that started before the video ends should keep playing.
+      // When only a gap to the next clip remains, jump to it.
+      const nextTime = audioStillActive
+        ? active.clipEnd
+        : Math.max(active.clipEnd, nextClip?.timelineStart ?? duration);
       applyVisualTime(nextTime);
       setPlayhead(nextTime);
     }

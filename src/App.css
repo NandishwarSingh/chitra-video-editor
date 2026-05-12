@@ -63,6 +63,16 @@ select:focus-visible {
   min-height: 100%;
   background: var(--surface-0);
   color: var(--text-1);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.editor-shell input,
+.editor-shell textarea,
+.edit-array-textarea,
+.chat-message-bubble {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .editor-shell.is-theater {
@@ -335,7 +345,7 @@ select:disabled {
 }
 
 .editor-shell.is-theater .media-bin,
-.editor-shell.is-theater .inspector {
+.editor-shell.is-theater .right-panel {
   display: none;
 }
 
@@ -1843,7 +1853,7 @@ input[type="range"] {
     grid-template-columns: 230px minmax(360px, 1fr);
   }
 
-  .inspector {
+  .right-panel {
     display: none;
   }
 }
