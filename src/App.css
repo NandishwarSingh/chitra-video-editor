@@ -1253,6 +1253,7 @@ input[type="range"] {
 }
 
 .clip-track,
+.audio-track,
 .text-track {
   position: absolute;
   right: 0;
@@ -1262,6 +1263,10 @@ input[type="range"] {
 
 .clip-track {
   height: 64px;
+}
+
+.audio-track {
+  height: 48px;
 }
 
 .timeline-track-row {
