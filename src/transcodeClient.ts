@@ -16,7 +16,7 @@ export type TranscodeComplete = {
 };
 
 export type RunTranscodeJobOptions = {
-  assets?: Array<{ file: File; id: string }>;
+  assets?: Array<{ file: File; id: string; kind?: 'audio' | 'video' }>;
   clips?: TimelineExportClip[];
   duration?: number;
   effects?: EffectSettings;

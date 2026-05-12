@@ -237,6 +237,60 @@ describe('transcode command builders', () => {
     ]);
   });
 
+  it('skips the video filter chain for audio-only inputs in layered export', () => {
+    const args = buildLayeredTimelineArgs({
+      assets: [
+        { id: 'asset-vid', inputPath: 'a.mp4', kind: 'video' },
+        { id: 'asset-aud', inputPath: 'b.m4a', kind: 'audio' },
+      ],
+      clips: [
+        {
+          assetId: 'asset-vid',
+          effects: DEFAULT_EFFECT_SETTINGS,
+          fadeIn: 0,
+          fadeOut: 0,
+          id: 'clip-v',
+          muted: false,
+          sourceIn: 0,
+          sourceOut: 5,
+          timelineStart: 0,
+          trackId: 'video-1',
+          transform: DEFAULT_CLIP_TRANSFORM,
+          volume: 1,
+        },
+        {
+          assetId: 'asset-aud',
+          effects: DEFAULT_EFFECT_SETTINGS,
+          fadeIn: 0,
+          fadeOut: 0,
+          id: 'clip-a',
+          muted: false,
+          sourceIn: 0,
+          sourceOut: 5,
+          timelineStart: 0,
+          trackId: 'audio-1',
+          transform: DEFAULT_CLIP_TRANSFORM,
+          volume: 1,
+        },
+      ],
+      outputHeight: 720,
+      outputPath: 'mix.mp4',
+      outputWidth: 1280,
+      textOverlays: [],
+      trackOrder: ['video-1', 'audio-1'],
+    });
+    const command = args.join(' ');
+
+    // The audio asset (index 1) must not feed a video chain. The video asset
+    // (index 0) should still have a [0:v]... chain, and both should contribute
+    // to the audio mix.
+    expect(command).toContain('[0:v]');
+    expect(command).not.toContain('[1:v]');
+    expect(command).toContain('[0:a]');
+    expect(command).toContain('[1:a]');
+    expect(command).toContain('amix=inputs=2');
+  });
+
   it('builds a layered timeline filter graph for overlapping tracks', () => {
     const args = buildLayeredTimelineArgs({
       assets: [

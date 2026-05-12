@@ -21,7 +21,7 @@ import {
 import type { TranscodeKind } from '../transcodeClient';
 
 type RunRequest = {
-  assets?: Array<{ file: File; id: string }>;
+  assets?: Array<{ file: File; id: string; kind?: 'audio' | 'video' }>;
   clips?: TimelineExportClip[];
   duration?: number;
   effects?: EffectSettings;
@@ -117,7 +117,16 @@ function createAssetInputName(file: File, index: number) {
   return `asset_${index}${extension.toLowerCase()}`;
 }
 
-function hasLayeredTimeline(clips: TimelineExportClip[]) {
+function hasLayeredTimeline(
+  clips: TimelineExportClip[],
+  assetKindById: Map<string, 'audio' | 'video'> = new Map(),
+) {
+  // Segment-and-concat path can't handle audio-only inputs (-map 0:v:0 fails),
+  // so force the layered compositor whenever any clip points at an audio asset.
+  if (clips.some((clip) => assetKindById.get(clip.assetId) === 'audio')) {
+    return true;
+  }
+
   const trackIds = new Set(clips.map((clip) => clip.trackId));
 
   if (trackIds.size > 1) {
@@ -216,16 +225,18 @@ async function runTimelineExportJob(request: RunRequest, ffmpeg: FFmpeg, started
   }
 
   const assetInputPaths = new Map<string, string>();
+  const assetKindById = new Map<string, 'audio' | 'video'>();
   const cleanupPaths: string[] = [];
 
   for (const [index, asset] of assets.entries()) {
     const inputPath = createAssetInputName(asset.file, index);
     assetInputPaths.set(asset.id, inputPath);
+    assetKindById.set(asset.id, asset.kind ?? 'video');
     cleanupPaths.push(inputPath);
     await ffmpeg.writeFile(inputPath, await fetchFile(asset.file));
   }
 
-  if (hasLayeredTimeline(clips)) {
+  if (hasLayeredTimeline(clips, assetKindById)) {
     const outputPath = 'layered-timeline-export.mp4';
     cleanupPaths.push(outputPath);
     const exitCode = await ffmpeg.exec(
@@ -233,6 +244,7 @@ async function runTimelineExportJob(request: RunRequest, ffmpeg: FFmpeg, started
         assets: assets.map((asset) => ({
           id: asset.id,
           inputPath: assetInputPaths.get(asset.id) as string,
+          kind: asset.kind ?? 'video',
         })),
         clips,
         outputFps: request.outputFps,

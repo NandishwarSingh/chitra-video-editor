@@ -38,7 +38,7 @@ export type TimelineExportTextOverlay = {
 };
 
 export type TimelineLayeredExportOptions = {
-  assets: Array<{ id: string; inputPath: string }>;
+  assets: Array<{ id: string; inputPath: string; kind?: 'audio' | 'video' }>;
   clips: TimelineExportClip[];
   duration?: number;
   outputFps?: number;
@@ -353,6 +353,7 @@ export function buildLayeredTimelineArgs({
   trackOrder = [],
 }: TimelineLayeredExportOptions) {
   const assetIndexById = new Map(assets.map((asset, index) => [asset.id, index]));
+  const assetKindById = new Map(assets.map((asset) => [asset.id, asset.kind ?? 'video'] as const));
   const trackIndexById = new Map(trackOrder.map((trackId, index) => [trackId, index]));
   const timelineDuration =
     duration ??
@@ -378,25 +379,29 @@ export function buildLayeredTimelineArgs({
       return;
     }
 
+    const assetKind = assetKindById.get(clip.assetId) ?? 'video';
     const clipDuration = Math.max(0.1, clip.sourceOut - clip.sourceIn);
-    const effectFilter = createFfmpegEffectFilter(clip.effects);
-    const videoFilters = [
-      `trim=start=${formatSeconds(clip.sourceIn)}:end=${formatSeconds(clip.sourceOut)}`,
-      `setpts=PTS-STARTPTS+${formatSeconds(clip.timelineStart)}/TB`,
-      `fps=${outputFps}`,
-      ...createVideoTransformFilters(clip, outputWidth, outputHeight),
-      effectFilter ? `eq=${effectFilter}` : null,
-      'format=rgba',
-    ].filter(Boolean);
-    const videoLabel = `v${index}`;
-    const nextBaseLabel = `base${index + 1}`;
-    filters.push(`[${inputIndex}:v]${videoFilters.join(',')}[${videoLabel}]`);
-    filters.push(
-      `[${baseLabel}][${videoLabel}]overlay=0:0:eof_action=pass:enable='between(t,${formatSeconds(clip.timelineStart)},${formatSeconds(
-        clip.timelineStart + clipDuration,
-      )})'[${nextBaseLabel}]`,
-    );
-    baseLabel = nextBaseLabel;
+
+    if (assetKind === 'video') {
+      const effectFilter = createFfmpegEffectFilter(clip.effects);
+      const videoFilters = [
+        `trim=start=${formatSeconds(clip.sourceIn)}:end=${formatSeconds(clip.sourceOut)}`,
+        `setpts=PTS-STARTPTS+${formatSeconds(clip.timelineStart)}/TB`,
+        `fps=${outputFps}`,
+        ...createVideoTransformFilters(clip, outputWidth, outputHeight),
+        effectFilter ? `eq=${effectFilter}` : null,
+        'format=rgba',
+      ].filter(Boolean);
+      const videoLabel = `v${index}`;
+      const nextBaseLabel = `base${index + 1}`;
+      filters.push(`[${inputIndex}:v]${videoFilters.join(',')}[${videoLabel}]`);
+      filters.push(
+        `[${baseLabel}][${videoLabel}]overlay=0:0:eof_action=pass:enable='between(t,${formatSeconds(clip.timelineStart)},${formatSeconds(
+          clip.timelineStart + clipDuration,
+        )})'[${nextBaseLabel}]`,
+      );
+      baseLabel = nextBaseLabel;
+    }
 
     if (!clip.muted) {
       const audioFilter = createAudioFilter(clip);

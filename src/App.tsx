@@ -1213,7 +1213,7 @@ function EditorWorkspace({
     performanceMonitor.markTranscodeStart('export');
 
     const job = runTranscodeJob({
-      assets: present.assets.map((asset) => ({ file: asset.file, id: asset.id })),
+      assets: present.assets.map((asset) => ({ file: asset.file, id: asset.id, kind: asset.kind })),
       clips: present.clips,
       kind: 'export-timeline-mp4',
       onProgress: ({ progress }) => {
