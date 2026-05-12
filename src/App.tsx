@@ -162,12 +162,26 @@ function getAudioContextConstructor() {
   return window.AudioContext ?? (window as WindowWithWebKitAudioContext).webkitAudioContext ?? null;
 }
 
-function formatAudioMeterDb(level: number) {
-  if (level <= 0.004) {
+const AUDIO_METER_FLOOR_DB = -60;
+
+function amplitudeToDbfs(amplitude: number) {
+  if (!Number.isFinite(amplitude) || amplitude <= 0.000_125) {
+    return AUDIO_METER_FLOOR_DB;
+  }
+
+  return Math.max(AUDIO_METER_FLOOR_DB, Math.min(0, 20 * Math.log10(amplitude)));
+}
+
+function dbfsToMeterPosition(dBFS: number) {
+  return clamp(1 + dBFS / Math.abs(AUDIO_METER_FLOOR_DB), 0, 1);
+}
+
+function formatAudioMeterDb(dBFS: number) {
+  if (dBFS <= AUDIO_METER_FLOOR_DB + 0.5) {
     return '-inf';
   }
 
-  return `${Math.max(-60, Math.round(20 * Math.log10(level)))} dB`;
+  return `${Math.round(dBFS)} dB`;
 }
 
 function createAsset(file: File): ProjectAsset {
@@ -640,12 +654,12 @@ function EditorWorkspace({
     objectUrlsRef.current.push(url);
   }, []);
 
-  const paintAudioMeter = useCallback((level: number, peak: number) => {
-    const safeLevel = clamp(level, 0, 1);
-    const safePeak = clamp(peak, 0, 1);
+  const paintAudioMeter = useCallback((meterPos: number, peakPos: number, dBFS: number) => {
+    const safeLevel = clamp(meterPos, 0, 1);
+    const safePeak = clamp(peakPos, 0, 1);
 
     if (audioMeterFillRef.current) {
-      audioMeterFillRef.current.style.transform = `scaleY(${safeLevel.toFixed(3)})`;
+      audioMeterFillRef.current.style.clipPath = `inset(${((1 - safeLevel) * 100).toFixed(2)}% 0 0 0)`;
     }
 
     if (audioMeterPeakRef.current) {
@@ -653,7 +667,7 @@ function EditorWorkspace({
     }
 
     if (audioMeterReadoutRef.current) {
-      audioMeterReadoutRef.current.textContent = formatAudioMeterDb(safeLevel);
+      audioMeterReadoutRef.current.textContent = formatAudioMeterDb(dBFS);
     }
   }, []);
 
@@ -805,6 +819,36 @@ function EditorWorkspace({
       type: 'ADD_TEXT',
     });
   }, [duration, getCurrentEditTime, hasTimeline]);
+
+  const deleteTrack = useCallback(
+    (trackId: string) => {
+      const track = present.tracks.find((candidate) => candidate.id === trackId);
+
+      if (!track) {
+        return;
+      }
+
+      const remainingVideoTracks = present.tracks.filter((candidate) => candidate.kind === 'video' && candidate.id !== trackId);
+
+      if (track.kind === 'video' && remainingVideoTracks.length === 0) {
+        setImportNotice('Cannot delete the last video track. Add another video track first.');
+        return;
+      }
+
+      const dependentClipCount = present.clips.filter((clip) => clip.trackId === trackId).length;
+      const confirmMessage =
+        dependentClipCount > 0
+          ? `Delete "${track.name}"? This also removes ${dependentClipCount} clip${dependentClipCount === 1 ? '' : 's'} on this track.`
+          : `Delete "${track.name}"?`;
+
+      if (!window.confirm(confirmMessage)) {
+        return;
+      }
+
+      dispatch({ trackId, type: 'DELETE_TRACK' });
+    },
+    [present],
+  );
 
   const addVideoTrack = useCallback(() => {
     const index = getNextTrackIndex(present, 'video');
@@ -1674,14 +1718,14 @@ function EditorWorkspace({
     if (!video || !activeAsset) {
       audioAnalyserRef.current = null;
       audioMeterDataRef.current = null;
-      paintAudioMeter(0, 0);
+      paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
       return;
     }
 
     const AudioContextConstructor = getAudioContextConstructor();
 
     if (!AudioContextConstructor) {
-      paintAudioMeter(0, 0);
+      paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
       if (audioMeterReadoutRef.current) {
         audioMeterReadoutRef.current.textContent = 'N/A';
       }
@@ -1709,7 +1753,7 @@ function EditorWorkspace({
     } catch {
       audioAnalyserRef.current = null;
       audioMeterDataRef.current = null;
-      paintAudioMeter(0, 0);
+      paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
     }
 
     return () => {
@@ -1730,19 +1774,21 @@ function EditorWorkspace({
         // The analyser may already be detached after a hot reload or media swap.
       }
 
-      paintAudioMeter(0, 0);
+      paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
     };
   }, [activeAsset?.playbackUrl, paintAudioMeter]);
 
   useEffect(() => {
     let animationFrame = 0;
     let lastPaintAt = 0;
-    let peak = 0;
+    let peakPosition = 0;
+    let peakDb = AUDIO_METER_FLOOR_DB;
 
     const tick = () => {
       const analyser = audioAnalyserRef.current;
       const data = audioMeterDataRef.current;
-      let level = 0;
+      let meterPos = 0;
+      let dBFS = AUDIO_METER_FLOOR_DB;
 
       if (isPlaying && analyser && data) {
         analyser.getByteTimeDomainData(data);
@@ -1755,21 +1801,31 @@ function EditorWorkspace({
 
         const rms = Math.sqrt(sum / data.length);
         const gain = audioMeterGainRef.current;
-        level = gain.muted ? 0 : clamp(Math.pow(rms * 4.6, 0.82) * gain.volume, 0, 1);
+        const adjustedAmplitude = gain.muted ? 0 : Math.min(1, rms * gain.volume);
+
+        dBFS = amplitudeToDbfs(adjustedAmplitude);
+        meterPos = dbfsToMeterPosition(dBFS);
       }
 
-      peak = isPlaying ? Math.max(level, peak * 0.94) : peak * 0.86;
+      if (isPlaying) {
+        peakPosition = Math.max(meterPos, peakPosition * 0.94);
+        peakDb = Math.max(dBFS, peakDb - 0.6);
+      } else {
+        peakPosition = peakPosition * 0.86;
+        peakDb = Math.max(AUDIO_METER_FLOOR_DB, peakDb - 1.5);
+      }
 
       const now = performance.now();
+
       if (now - lastPaintAt > 40 || !isPlaying) {
-        paintAudioMeter(level, peak);
+        paintAudioMeter(meterPos, peakPosition, dBFS);
         lastPaintAt = now;
       }
 
-      if (isPlaying || peak > 0.01) {
+      if (isPlaying || peakPosition > 0.01) {
         animationFrame = window.requestAnimationFrame(() => tick());
       } else {
-        paintAudioMeter(0, 0);
+        paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
       }
     };
 
@@ -2518,17 +2574,33 @@ function EditorWorkspace({
                   }}
                   style={{ top: `${top}px` }}
                 >
-                  <button
-                    className="track-label"
-                    onPointerDown={(event) => {
-                      event.stopPropagation();
-                      dispatch({ trackId: track.id, type: 'SELECT_TRACK' });
-                    }}
-                    type="button"
-                  >
-                    <strong>{track.name}</strong>
-                    <span>{track.visible ? 'Visible' : 'Hidden'}</span>
-                  </button>
+                  <div className="track-label-shell">
+                    <button
+                      className="track-label"
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        dispatch({ trackId: track.id, type: 'SELECT_TRACK' });
+                      }}
+                      type="button"
+                    >
+                      <strong>{track.name}</strong>
+                      <span>{track.visible ? 'Visible' : 'Hidden'}</span>
+                    </button>
+                    <button
+                      aria-label={`Delete ${track.name}`}
+                      className="track-delete"
+                      disabled={track.kind === 'video' && videoTracks.length <= 1}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        deleteTrack(track.id);
+                      }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      title={track.kind === 'video' && videoTracks.length <= 1 ? 'Add another video track to delete this one' : 'Delete track'}
+                      type="button"
+                    >
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
                   {trackClips.length === 0 && present.clips.length === 0 && index === 0 ? (
                     <button className="empty-timeline" onClick={() => selectedAsset && addAssetToTimeline(selectedAsset.id, 0, track.id)} type="button">
                       Drag media here or select an asset and add it.

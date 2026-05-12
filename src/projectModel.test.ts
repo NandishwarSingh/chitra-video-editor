@@ -170,6 +170,50 @@ describe('project model', () => {
     expect(getFirstClipByTimelineOrder(state.present)?.timelineStart).toBe(3);
   });
 
+  it('refuses to delete the only video track', () => {
+    let state = createInitialProject();
+    const onlyTrackId = state.present.tracks[0].id;
+    state = projectReducer(state, { trackId: onlyTrackId, type: 'DELETE_TRACK' });
+
+    expect(state.present.tracks.map((track) => track.id)).toEqual([onlyTrackId]);
+  });
+
+  it('deletes a video track when another video track remains, ripple-removing its clips', () => {
+    let state = createInitialProject();
+    const firstTrackId = state.present.tracks[0].id;
+    state = projectReducer(state, {
+      track: { id: 'video-2', index: 1, kind: 'video', locked: false, muted: false, name: 'Video 2', visible: true },
+      type: 'ADD_TRACK',
+    });
+    state = projectReducer(state, { assets: [asset('a', 5)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, {
+      assetId: 'a',
+      clipId: 'clip-on-second',
+      trackId: 'video-2',
+      type: 'ADD_ASSET_TO_TIMELINE',
+    });
+    state = projectReducer(state, { trackId: 'video-2', type: 'SELECT_TRACK' });
+    expect(state.present.selectedTrackId).toBe('video-2');
+
+    state = projectReducer(state, { trackId: 'video-2', type: 'DELETE_TRACK' });
+
+    expect(state.present.tracks.map((track) => track.id)).toEqual([firstTrackId]);
+    expect(state.present.clips).toEqual([]);
+    expect(state.present.selectedTrackId).toBe(firstTrackId);
+  });
+
+  it('deletes an audio track regardless of whether other audio tracks remain', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, {
+      track: { id: 'audio-1', index: 0, kind: 'audio', locked: false, muted: false, name: 'Audio 1', visible: true },
+      type: 'ADD_TRACK',
+    });
+
+    state = projectReducer(state, { trackId: 'audio-1', type: 'DELETE_TRACK' });
+
+    expect(state.present.tracks.some((track) => track.id === 'audio-1')).toBe(false);
+  });
+
   it('finds the next clip after a gap and returns null past the end', () => {
     let state = createInitialProject();
     state = projectReducer(state, { assets: [asset('a', 4), asset('b', 4)], type: 'ADD_ASSETS' });

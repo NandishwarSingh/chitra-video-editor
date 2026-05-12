@@ -89,6 +89,7 @@ export type ProjectAction =
   | { assetId: string; clipId: string; timelineStart?: number; trackId?: string; type: 'ADD_ASSET_TO_TIMELINE' }
   | { track: TimelineTrack; type: 'ADD_TRACK' }
   | { patch: Partial<Pick<TimelineTrack, 'locked' | 'muted' | 'name' | 'visible'>>; trackId: string; type: 'UPDATE_TRACK' }
+  | { trackId: string; type: 'DELETE_TRACK' }
   | { trackId: string | null; type: 'SELECT_TRACK' }
   | { clipId: string | null; type: 'SELECT_CLIP' }
   | { playhead: number; newClipId: string; type: 'SPLIT_CLIP' }
@@ -602,6 +603,41 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
           project.tracks.map((track) => (track.id === action.trackId ? { ...track, ...action.patch } : track)),
         ),
       };
+
+    case 'DELETE_TRACK': {
+      const target = project.tracks.find((track) => track.id === action.trackId);
+
+      if (!target) {
+        return project;
+      }
+
+      const remainingVideoTracks = project.tracks.filter(
+        (track) => track.kind === 'video' && track.id !== action.trackId,
+      );
+
+      if (target.kind === 'video' && remainingVideoTracks.length === 0) {
+        return project;
+      }
+
+      const dependentClipIds = new Set(
+        project.clips.filter((clip) => clip.trackId === action.trackId).map((clip) => clip.id),
+      );
+      const tracks = project.tracks.filter((track) => track.id !== action.trackId);
+      const clips = removeClipsWithRipple(project, dependentClipIds);
+      const selectedClipStillExists = clips.some((clip) => clip.id === project.selectedClipId);
+      const nextSelectedTrackId =
+        project.selectedTrackId === action.trackId
+          ? remainingVideoTracks[0]?.id ?? tracks.find((track) => track.kind === 'audio')?.id ?? null
+          : project.selectedTrackId;
+
+      return {
+        ...project,
+        clips: sortClipsForRuntime(clips, tracks),
+        selectedClipId: selectedClipStillExists ? project.selectedClipId : null,
+        selectedTrackId: nextSelectedTrackId,
+        tracks,
+      };
+    }
 
     case 'SELECT_TRACK':
       return {
