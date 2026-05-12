@@ -341,7 +341,7 @@ select:disabled {
 }
 
 .editor-shell.is-theater .workspace {
-  grid-template-columns: 0 minmax(420px, 1fr) 0;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .editor-shell.is-theater .media-bin,
