@@ -124,7 +124,7 @@ describe('transcode command builders', () => {
       ],
     });
 
-    expect(args.join(' ')).toContain('eq=brightness=0.100:contrast=1.100:saturation=0.900,drawtext:text=');
+    expect(args.join(' ')).toContain('eq=brightness=0.100:contrast=1.100:saturation=0.900,drawtext=fontfile=/tmp/font.woff:text=');
     expect(args.join(' ')).toContain('fps=24,scale=1080:1920');
     expect(args.join(' ')).toContain('scale=iw*1.2000:ih*1.2000');
     expect(args.join(' ')).toContain('crop=1080:1920:(iw-1080)*0.4500:(ih-1920)*0.3500');

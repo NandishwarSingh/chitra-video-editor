@@ -160,7 +160,14 @@ export function buildExportMp4Args({
   return args;
 }
 
-export function createDrawTextFilter(overlay: TimelineExportTextOverlay, clipTimelineStart: number, clipDuration: number) {
+export const DRAWTEXT_DEFAULT_FONTFILE = '/tmp/font.woff';
+
+export function createDrawTextFilter(
+  overlay: TimelineExportTextOverlay,
+  clipTimelineStart: number,
+  clipDuration: number,
+  fontfile: string = DRAWTEXT_DEFAULT_FONTFILE,
+) {
   const localStart = Math.max(0, overlay.start - clipTimelineStart);
   const localEnd = Math.min(clipDuration, overlay.end - clipTimelineStart);
 
@@ -175,15 +182,20 @@ export function createDrawTextFilter(overlay: TimelineExportTextOverlay, clipTim
         ? `w*${overlay.x.toFixed(3)}-text_w/2`
         : `w*${overlay.x.toFixed(3)}-text_w`;
 
-  return [
-    'drawtext',
+  const options = [
+    `fontfile=${fontfile}`,
     `text='${escapeDrawText(overlay.text)}'`,
     'fontcolor=white',
     `fontsize=${Math.round(overlay.size)}`,
     `x=${x}`,
     `y=(h-text_h)*${overlay.y.toFixed(3)}`,
+    `box=1`,
+    `boxcolor=black@0.45`,
+    `boxborderw=8`,
     `enable='between(t,${formatSeconds(localStart)},${formatSeconds(localEnd)})'`,
   ].join(':');
+
+  return `drawtext=${options}`;
 }
 
 export function createAudioFilter(clip: TimelineExportClip) {

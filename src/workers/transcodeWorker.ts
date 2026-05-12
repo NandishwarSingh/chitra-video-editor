@@ -2,6 +2,7 @@ import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile } from '@ffmpeg/util';
 import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
+import fontURL from '../assets/font.woff?url';
 import { DEFAULT_EFFECT_SETTINGS } from '../effects';
 import type { EffectSettings } from '../effects';
 import {
@@ -58,6 +59,25 @@ function postError(jobId: string, message: string) {
   });
 }
 
+export const DRAWTEXT_FONT_PATH = '/tmp/font.woff';
+
+let fontBytesCache: Uint8Array | null = null;
+
+async function loadDrawTextFont() {
+  if (fontBytesCache) {
+    return fontBytesCache;
+  }
+
+  const response = await fetch(fontURL);
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch drawtext font (${response.status}).`);
+  }
+
+  fontBytesCache = new Uint8Array(await response.arrayBuffer());
+  return fontBytesCache;
+}
+
 async function loadFfmpeg(jobId: string) {
   const ffmpeg = new FFmpeg();
   activeFfmpeg = ffmpeg;
@@ -84,6 +104,11 @@ async function loadFfmpeg(jobId: string) {
   });
 
   return ffmpeg;
+}
+
+async function ensureDrawTextFont(ffmpeg: FFmpeg) {
+  const fontBytes = await loadDrawTextFont();
+  await ffmpeg.writeFile(DRAWTEXT_FONT_PATH, fontBytes);
 }
 
 function createAssetInputName(file: File, index: number) {
@@ -184,6 +209,10 @@ async function runTimelineExportJob(request: RunRequest, ffmpeg: FFmpeg, started
 
   if (assets.length === 0 || clips.length === 0) {
     throw new Error('Timeline export needs at least one asset and one clip.');
+  }
+
+  if ((request.textOverlays ?? []).length > 0) {
+    await ensureDrawTextFont(ffmpeg);
   }
 
   const assetInputPaths = new Map<string, string>();
