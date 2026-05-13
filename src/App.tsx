@@ -157,10 +157,9 @@ const TIMELINE_TRACK_GAP = 8;
 const TIMELINE_TEXT_TRACK_HEIGHT = 42;
 const TIMELINE_LABEL_WIDTH = 116;
 const MAX_TIMELINE_CLIP_THUMBNAILS = 14;
-type MediaElementWithCaptureStream = HTMLMediaElement & {
-  captureStream?: () => MediaStream;
-  mozCaptureStream?: () => MediaStream;
-};
+// MediaElementAudioSourceNode can only be created ONCE per media element. The
+// constructor throws on subsequent attempts, so we cache per element.
+const mediaElementAudioSources = new WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>();
 
 function createId(prefix: string) {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -2082,7 +2081,7 @@ function EditorWorkspace({
   }, [activeTimeline?.clip.muted, activeTimeline?.clip.volume]);
 
   useEffect(() => {
-    const media = getActiveMediaElement() as MediaElementWithCaptureStream | null;
+    const media = getActiveMediaElement();
 
     if (!media || !activeAsset) {
       audioAnalyserRef.current = null;
@@ -2092,12 +2091,8 @@ function EditorWorkspace({
     }
 
     const AudioContextConstructor = getAudioContextConstructor();
-    const captureStream = media.captureStream ?? media.mozCaptureStream;
 
-    if (!AudioContextConstructor || !captureStream) {
-      // Without captureStream / Web Audio we still want playback to work —
-      // the element plays through the default audio output natively. The meter
-      // just sits at silence.
+    if (!AudioContextConstructor) {
       paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
       if (audioMeterReadoutRef.current) {
         audioMeterReadoutRef.current.textContent = 'N/A';
@@ -2105,68 +2100,55 @@ function EditorWorkspace({
       return;
     }
 
-    let analyser: AnalyserNode | null = null;
-    let source: MediaStreamAudioSourceNode | null = null;
+    const context = audioContextRef.current ?? new AudioContextConstructor();
+    audioContextRef.current = context;
 
-    const setupMeter = () => {
-      if (analyser) {
-        return;
-      }
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.82;
 
-      let stream: MediaStream;
+    // createMediaElementSource may only be called once per element. Cache
+    // per-element in a WeakMap; the entry dies with the element so each new
+    // <video>/<audio> mount gets a fresh source on first use.
+    let source: MediaElementAudioSourceNode | null = mediaElementAudioSources.get(media) ?? null;
+    if (!source) {
       try {
-        stream = captureStream.call(media);
+        source = context.createMediaElementSource(media);
+        mediaElementAudioSources.set(media, source);
       } catch {
+        // Some browsers refuse to attach a second source — leave the meter
+        // silent but don't break playback.
+        paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
         return;
       }
+    }
 
-      if (stream.getAudioTracks().length === 0) {
-        return;
-      }
+    try {
+      // Source -> analyser -> destination. We MUST connect to destination
+      // because createMediaElementSource hijacks the element's native audio
+      // output: with the source routed through Web Audio, the element plays
+      // through whatever the context's graph eventually reaches. Without
+      // analyser.connect(destination) we'd get silence.
+      source.connect(analyser);
+      analyser.connect(context.destination);
+      audioAnalyserRef.current = analyser;
+      audioMeterDataRef.current = new Uint8Array(analyser.fftSize);
+    } catch {
+      audioAnalyserRef.current = null;
+      audioMeterDataRef.current = null;
+      paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
+    }
 
-      try {
-        const context = audioContextRef.current ?? new AudioContextConstructor();
-        audioContextRef.current = context;
-
-        const newAnalyser = context.createAnalyser();
-        newAnalyser.fftSize = 1024;
-        newAnalyser.smoothingTimeConstant = 0.82;
-
-        const newSource = context.createMediaStreamSource(stream);
-        // Tap into the analyser only. We deliberately do NOT connect to
-        // context.destination — the media element is already playing its audio
-        // through the default audio output. Connecting destination here would
-        // double-mix and (worse) keep audio inaudible when the context is
-        // suspended.
-        newSource.connect(newAnalyser);
-
-        analyser = newAnalyser;
-        source = newSource;
-        audioAnalyserRef.current = analyser;
-        audioMeterDataRef.current = new Uint8Array(analyser.fftSize);
-      } catch {
-        analyser = null;
-        source = null;
-      }
-    };
-
+    // togglePlayback already resumes the context inside the user-gesture
+    // chain. As a safety net, attempt resume() on 'play' too in case the
+    // context was created after that initial click.
     const onPlay = () => {
-      // play() ran inside a user-gesture chain, so this is the right moment to
-      // resume any AudioContext we created for the meter analyser.
       void audioContextRef.current?.resume().catch(() => undefined);
-      setupMeter();
     };
-    const onLoadedData = () => setupMeter();
-
     media.addEventListener('play', onPlay);
-    media.addEventListener('loadeddata', onLoadedData);
-
-    // Try setup once eagerly in case the element already has data.
-    setupMeter();
 
     return () => {
       media.removeEventListener('play', onPlay);
-      media.removeEventListener('loadeddata', onLoadedData);
 
       if (audioAnalyserRef.current === analyser) {
         audioAnalyserRef.current = null;
@@ -2174,15 +2156,15 @@ function EditorWorkspace({
       }
 
       try {
-        source?.disconnect();
+        source?.disconnect(analyser);
       } catch {
-        // already detached
+        // source might already be detached
       }
 
       try {
-        analyser?.disconnect();
+        analyser.disconnect();
       } catch {
-        // already detached
+        // analyser might already be detached
       }
 
       paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
