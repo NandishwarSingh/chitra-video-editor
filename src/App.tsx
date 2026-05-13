@@ -1328,6 +1328,73 @@ function EditorWorkspace({
     setIsPlaying(false);
   }, [getActiveMediaElement]);
 
+  // Build (or repair) the persistent audio graph that makes both playback and
+  // the dB meter work. MUST be called inside a user-gesture handler the first
+  // time — that's when the AudioContext is created so it starts in 'running'
+  // state rather than 'suspended'.
+  //
+  // Topology:
+  //   <video>/<audio>  ──createMediaElementSource──▶  source
+  //   source           ──connect──▶                   analyser
+  //   analyser         ──connect──▶                   context.destination
+  //
+  // createMediaElementSource hijacks the element's native audio output, so the
+  // chain MUST reach destination — otherwise the audio is silent. The analyser
+  // is a pass-through, so inserting it in-line lets us meter without
+  // disrupting playback. We only build the analyser once and keep it for the
+  // life of the editor.
+  const ensureAudioMeterChain = useCallback(() => {
+    let context = audioContextRef.current;
+
+    if (!context) {
+      const Constructor = getAudioContextConstructor();
+      if (!Constructor) {
+        return null;
+      }
+      context = new Constructor();
+      audioContextRef.current = context;
+    }
+
+    // Idempotent: only resumes if not already running. On iOS/Safari this
+    // call has to happen inside a user gesture; the resume Promise is
+    // intentionally not awaited so we stay synchronous in the gesture chain.
+    if (context.state !== 'running') {
+      void context.resume().catch(() => undefined);
+    }
+
+    let analyser = audioAnalyserRef.current;
+    if (!analyser) {
+      analyser = context.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.82;
+      analyser.connect(context.destination);
+      audioAnalyserRef.current = analyser;
+      audioMeterDataRef.current = new Uint8Array(analyser.fftSize);
+    }
+
+    const media = getActiveMediaElement();
+    if (media) {
+      let source = mediaElementAudioSources.get(media);
+      if (!source) {
+        try {
+          source = context.createMediaElementSource(media);
+          mediaElementAudioSources.set(media, source);
+        } catch {
+          return analyser;
+        }
+      }
+      // connect() is idempotent on identical (source, destination) pairs, so
+      // calling this on every gesture / clip change is safe.
+      try {
+        source.connect(analyser);
+      } catch {
+        // already connected
+      }
+    }
+
+    return analyser;
+  }, [getActiveMediaElement]);
+
   const playPlayback = useCallback(async () => {
     if (!hasTimeline) {
       return;
@@ -1379,10 +1446,11 @@ function EditorWorkspace({
   }, [duration, getActiveMediaElement, hasTimeline, playbackRate, playhead, present]);
 
   const togglePlayback = useCallback(() => {
-    // AudioContext.resume() must be called inside a user-gesture handler in some
-    // browsers (notably Safari). Without this, source.connect(analyser).connect(destination)
-    // routes the media element's audio through a suspended context and the user hears nothing.
-    void audioContextRef.current?.resume().catch(() => undefined);
+    // This is the user-gesture chain. Building the audio graph HERE (rather
+    // than in a useEffect) is what guarantees the AudioContext starts in
+    // 'running' state instead of 'suspended' — which is why audio used to be
+    // silent after createMediaElementSource hijacked the element's output.
+    ensureAudioMeterChain();
 
     if (isPlaying) {
       pausePlayback();
@@ -1390,7 +1458,7 @@ function EditorWorkspace({
     }
 
     void playPlayback();
-  }, [isPlaying, pausePlayback, playPlayback]);
+  }, [ensureAudioMeterChain, isPlaying, pausePlayback, playPlayback]);
 
   const stepBy = useCallback(
     (amount: number) => {
@@ -2080,96 +2148,41 @@ function EditorWorkspace({
     };
   }, [activeTimeline?.clip.muted, activeTimeline?.clip.volume]);
 
+  // When the active media element changes (clip transition, asset swap),
+  // wire its source into the existing audio graph. This only takes effect
+  // AFTER ensureAudioMeterChain has been called once from a user gesture —
+  // before that, there's no AudioContext and no analyser, and the element
+  // is playing through its native audio output (also fine).
   useEffect(() => {
-    const media = getActiveMediaElement();
-
-    if (!media || !activeAsset) {
-      audioAnalyserRef.current = null;
-      audioMeterDataRef.current = null;
-      paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
+    if (!activeAsset) {
       return;
     }
-
-    const AudioContextConstructor = getAudioContextConstructor();
-
-    if (!AudioContextConstructor) {
-      paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
-      if (audioMeterReadoutRef.current) {
-        audioMeterReadoutRef.current.textContent = 'N/A';
-      }
+    if (!audioContextRef.current || !audioAnalyserRef.current) {
       return;
     }
+    ensureAudioMeterChain();
+  }, [activeAsset, ensureAudioMeterChain]);
 
-    const context = audioContextRef.current ?? new AudioContextConstructor();
-    audioContextRef.current = context;
-
-    const analyser = context.createAnalyser();
-    analyser.fftSize = 1024;
-    analyser.smoothingTimeConstant = 0.82;
-
-    // createMediaElementSource may only be called once per element. Cache
-    // per-element in a WeakMap; the entry dies with the element so each new
-    // <video>/<audio> mount gets a fresh source on first use.
-    let source: MediaElementAudioSourceNode | null = mediaElementAudioSources.get(media) ?? null;
-    if (!source) {
-      try {
-        source = context.createMediaElementSource(media);
-        mediaElementAudioSources.set(media, source);
-      } catch {
-        // Some browsers refuse to attach a second source — leave the meter
-        // silent but don't break playback.
-        paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
-        return;
-      }
+  // Surface a 'N/A' readout when Web Audio is unavailable at all (very rare,
+  // e.g. some older browsers). This runs once.
+  useEffect(() => {
+    if (!getAudioContextConstructor() && audioMeterReadoutRef.current) {
+      audioMeterReadoutRef.current.textContent = 'N/A';
     }
+  }, []);
 
-    try {
-      // Source -> analyser -> destination. We MUST connect to destination
-      // because createMediaElementSource hijacks the element's native audio
-      // output: with the source routed through Web Audio, the element plays
-      // through whatever the context's graph eventually reaches. Without
-      // analyser.connect(destination) we'd get silence.
-      source.connect(analyser);
-      analyser.connect(context.destination);
-      audioAnalyserRef.current = analyser;
-      audioMeterDataRef.current = new Uint8Array(analyser.fftSize);
-    } catch {
-      audioAnalyserRef.current = null;
-      audioMeterDataRef.current = null;
-      paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
-    }
-
-    // togglePlayback already resumes the context inside the user-gesture
-    // chain. As a safety net, attempt resume() on 'play' too in case the
-    // context was created after that initial click.
-    const onPlay = () => {
-      void audioContextRef.current?.resume().catch(() => undefined);
-    };
-    media.addEventListener('play', onPlay);
-
+  // Tear down the singleton AudioContext when the editor unmounts.
+  useEffect(() => {
     return () => {
-      media.removeEventListener('play', onPlay);
-
-      if (audioAnalyserRef.current === analyser) {
-        audioAnalyserRef.current = null;
-        audioMeterDataRef.current = null;
+      const context = audioContextRef.current;
+      audioAnalyserRef.current = null;
+      audioMeterDataRef.current = null;
+      audioContextRef.current = null;
+      if (context) {
+        void context.close().catch(() => undefined);
       }
-
-      try {
-        source?.disconnect(analyser);
-      } catch {
-        // source might already be detached
-      }
-
-      try {
-        analyser.disconnect();
-      } catch {
-        // analyser might already be detached
-      }
-
-      paintAudioMeter(0, 0, AUDIO_METER_FLOOR_DB);
     };
-  }, [activeAsset?.playbackUrl, getActiveMediaElement, paintAudioMeter]);
+  }, []);
 
   useEffect(() => {
     let animationFrame = 0;
