@@ -1,0 +1,18 @@
+[package]
+name = "chitra-transcode"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+chitra-core.workspace = true
+tokio = { workspace = true, features = ["full", "process"] }
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+time.workspace = true

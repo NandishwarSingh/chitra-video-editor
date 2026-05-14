@@ -1,0 +1,60 @@
+[workspace]
+members = ["crates/api", "crates/chat", "crates/storage", "crates/transcode", "crates/core"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+authors = ["Nandishwar"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+async-stream = "0.3"
+
+# HTTP server / middleware
+axum = { version = "0.7", features = ["macros", "ws", "multipart"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-br", "limit"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+
+# Logging / telemetry
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors / utilities
+anyhow = "1"
+thiserror = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "macros"] }
+dotenvy = "0.15"
+tempfile = "3.10"
+
+# HTTP client (for LLM proxying)
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
+
+# Database
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "uuid", "time", "json"] }
+
+# Object storage
+object_store = { version = "0.11", features = ["aws"] }
+
+# Internal crates (resolved by path inside the workspace)
+chitra-chat = { path = "crates/chat" }
+chitra-core = { path = "crates/core" }
+chitra-storage = { path = "crates/storage" }
+chitra-transcode = { path = "crates/transcode" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
