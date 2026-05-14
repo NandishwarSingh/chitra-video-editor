@@ -16,11 +16,17 @@ export type TimelineRuntimeOptions = {
   outPoint: number;
   pixelOffset?: number;
   pixelsPerSecond?: number;
+  playbackRate?: number;
   playhead: number;
   setIsPlaying: (isPlaying: boolean) => void;
   setPlayhead: (time: number | ((previous: number) => number)) => void;
   timelineTimeToVideoTime?: (time: number) => number | null;
   videoRef: MutableRefObject<HTMLMediaElement | null>;
+  // When true, the master <video> is paused (timeline is in a gap with no
+  // active clip) and the playhead is driven by wall clock. The audio overlay
+  // continues uninterrupted via its own <audio> element; this loop only
+  // advances the visual playhead until a clip becomes active again.
+  wallClockMode?: boolean;
 };
 
 export function useTimelineRuntime({
@@ -33,11 +39,13 @@ export function useTimelineRuntime({
   outPoint,
   pixelOffset = 0,
   pixelsPerSecond,
+  playbackRate = 1,
   playhead,
   setIsPlaying,
   setPlayhead,
   timelineTimeToVideoTime,
   videoRef,
+  wallClockMode = false,
 }: TimelineRuntimeOptions) {
   const playheadRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
@@ -153,6 +161,38 @@ export function useTimelineRuntime({
       return;
     }
 
+    // Gap playback: the master <video> is paused (no clip is active), so its
+    // rVFC callback never fires and currentTime is frozen. Drive the playhead
+    // from a wall clock instead. Commits to React state at ~12.5 Hz so we
+    // don't trigger a render storm; the visual playhead refreshes every rAF.
+    if (wallClockMode) {
+      let lastWall = performance.now();
+      let lastCommitWall = lastWall;
+      let nextTime = playhead;
+      const tick = () => {
+        const now = performance.now();
+        const dt = (now - lastWall) / 1000;
+        lastWall = now;
+        nextTime = Math.min(nextTime + dt * playbackRate, duration || nextTime);
+        applyVisualTime(nextTime);
+        if (now - lastCommitWall > 80) {
+          lastCommitWall = now;
+          setPlayhead(nextTime);
+        }
+        if (duration > 0 && nextTime >= duration) {
+          setIsPlaying(false);
+          rafRef.current = null;
+          return;
+        }
+        rafRef.current = requestAnimationFrame(tick);
+      };
+      rafRef.current = requestAnimationFrame(tick);
+      return () => {
+        cancelLoops();
+        setPlayhead(nextTime);
+      };
+    }
+
     const video = videoRef.current as MediaElementWithFrameCallback | null;
 
     if (!video) {
@@ -176,7 +216,7 @@ export function useTimelineRuntime({
     }
 
     return cancelLoops;
-  }, [cancelLoops, hasMedia, isPlaying, syncFromVideo, videoRef]);
+  }, [applyVisualTime, cancelLoops, duration, hasMedia, isPlaying, playbackRate, playhead, setIsPlaying, setPlayhead, syncFromVideo, videoRef, wallClockMode]);
 
   const seekTo = useCallback(
     (time: number) => {

@@ -8,6 +8,7 @@ import {
   FolderOpen,
   Magnet,
   Maximize2,
+  Mic,
   Music,
   Pause,
   Pencil,
@@ -43,9 +44,12 @@ import {
   useRef,
   useState,
 } from 'react';
-import { ChatPanel } from './ChatPanel';
+import { ChatPanel, type ChatToolCall, type ChatToolResult } from './ChatPanel';
 import { DEFAULT_EFFECT_SETTINGS, hasActiveEffects } from './effects';
 import { createEditArrayFromRuntime, stringifyEditArray } from './editArrayLanguage';
+import { compileEditArrayProgram } from './editCompiler';
+import { executeEditPlan } from './editRuntime';
+import { transcribeFile } from './transcribe';
 import {
   createMediaFingerprint,
   createTypedMediaFile,
@@ -77,6 +81,13 @@ import {
   getTrackById,
   getVideoClipsAtTime,
   getVideoTracksTopFirst,
+  DEFAULT_TEXT_OVERLAY,
+  TEXT_FONT_FAMILIES,
+  buildTimelineIndex,
+  getActiveTextOverlaysFromIndex,
+  getAudioClipsAtTimeFromIndex,
+  getClipsAtTimeFromIndex,
+  getVideoClipsAtTimeFromIndex,
   idleJobStatus,
   projectReducer,
   snapToTarget,
@@ -84,6 +95,7 @@ import {
   type JobStatus,
   type ProjectAsset,
   type ProjectPresent,
+  type TextFontFamilyId,
   type TextOverlay,
   type TimelineClip,
   type TimelineTrack,
@@ -105,7 +117,22 @@ import {
   type ProjectRecord,
   type ProjectSettings,
 } from './projectPersistence';
-import { createProxyCacheKey, deleteCachedProxy, getCachedProxy, listProjectRecords, putCachedProxy, putJobMetadata, putProjectRecord } from './projectStore';
+import {
+  createProxyCacheKey,
+  deleteCachedProxy,
+  getAssetBeats,
+  getAssetTranscript,
+  getCachedProxy,
+  listProjectRecords,
+  putAssetBeats,
+  putAssetTranscript,
+  putCachedProxy,
+  putJobMetadata,
+  putProjectRecord,
+  type StoredAssetTranscript,
+  type StoredBeatData,
+} from './projectStore';
+import { detectBeats } from './beatDetection';
 import { runTranscodeJob } from './transcodeClient';
 import { clamp, formatBytes, formatClock } from './time';
 import { isClipReorderDrag } from './timelineInteractions';
@@ -118,8 +145,10 @@ type DragMode =
   | { type: 'playhead'; wasPlaying: boolean }
   | { clipId: string; startTransform: ClipTransform; startX: number; startY: number; type: 'preview-clip-move' }
   | { clipId: string; startScale: number; startX: number; type: 'preview-clip-scale' }
+  | { centerX: number; centerY: number; clipId: string; startAngle: number; startRotation: number; type: 'preview-clip-rotate' }
   | { startEnd: number; startStart: number; startTrackId: string; startX: number; startY: number; textId: string; type: 'timeline-text-move' }
   | { startSize: number; startX: number; textId: string; type: 'preview-text-scale' }
+  | { centerX: number; centerY: number; startAngle: number; startRotation: number; textId: string; type: 'preview-text-rotate' }
   | { startTextX: number; startTextY: number; startX: number; startY: number; textId: string; type: 'preview-text-move' }
   | { type: 'trim-end'; clipId: string }
   | { type: 'trim-start'; clipId: string }
@@ -152,9 +181,9 @@ const TIMELINE_MIN_WIDTH = 760;
 const TIMELINE_RULER_HEIGHT = 34;
 const TIMELINE_TRACK_TOP = 42;
 const TIMELINE_TRACK_HEIGHT = 64;
-const TIMELINE_AUDIO_TRACK_HEIGHT = 48;
+const TIMELINE_AUDIO_TRACK_HEIGHT = 64;
 const TIMELINE_TRACK_GAP = 8;
-const TIMELINE_TEXT_TRACK_HEIGHT = 42;
+const TIMELINE_TEXT_TRACK_HEIGHT = 64;
 const TIMELINE_LABEL_WIDTH = 116;
 const MAX_TIMELINE_CLIP_THUMBNAILS = 14;
 // MediaElementAudioSourceNode can only be created ONCE per media element. The
@@ -377,6 +406,9 @@ type PreviewLayerVideoProps = {
 
 function PreviewLayerVideo({ asset, clip, isPlaying, localTime, playbackRate, style }: PreviewLayerVideoProps) {
   const layerVideoRef = useRef<HTMLVideoElement>(null);
+  const wasPlayingRef = useRef(false);
+  const lastClipIdRef = useRef<string>(clip.id);
+  const lastSeekAtRef = useRef(0);
 
   useEffect(() => {
     const video = layerVideoRef.current;
@@ -389,9 +421,26 @@ function PreviewLayerVideo({ asset, clip, isPlaying, localTime, playbackRate, st
     video.muted = true;
     video.volume = 0;
 
+    const clipChanged = lastClipIdRef.current !== clip.id;
+    lastClipIdRef.current = clip.id;
+    const playStarting = isPlaying && !wasPlayingRef.current;
+    wasPlayingRef.current = isPlaying;
+
     const targetTime = clip.sourceIn + localTime;
-    if (Math.abs(video.currentTime - targetTime) > 0.08) {
+    const drift = Math.abs(video.currentTime - targetTime);
+    const now = performance.now();
+
+    // Match PreviewLayerAudio: avoid constant re-seeking that thrashes the
+    // decoder. The visual offset of a secondary layer is imperceptible at
+    // sub-300 ms drift, and rate-limiting prevents stutter on heavier clips.
+    const shouldSync =
+      playStarting ||
+      clipChanged ||
+      (drift > 0.3 && now - lastSeekAtRef.current > 800);
+
+    if (shouldSync) {
       seekVideoSafely(video, targetTime);
+      lastSeekAtRef.current = now;
     }
 
     if (isPlaying) {
@@ -401,7 +450,7 @@ function PreviewLayerVideo({ asset, clip, isPlaying, localTime, playbackRate, st
     } else {
       video.pause();
     }
-  }, [clip.sourceIn, isPlaying, localTime, playbackRate]);
+  }, [clip.id, clip.sourceIn, isPlaying, localTime, playbackRate]);
 
   useEffect(() => {
     // Release the decoder when this layer unmounts. Without this, browsers
@@ -435,6 +484,9 @@ type PreviewLayerAudioProps = {
 
 function PreviewLayerAudio({ asset, clip, isPlaying, localTime, playbackRate }: PreviewLayerAudioProps) {
   const layerAudioRef = useRef<HTMLAudioElement>(null);
+  const wasPlayingRef = useRef(false);
+  const lastClipIdRef = useRef<string>(clip.id);
+  const lastSeekAtRef = useRef(0);
 
   useEffect(() => {
     const audio = layerAudioRef.current;
@@ -447,10 +499,30 @@ function PreviewLayerAudio({ asset, clip, isPlaying, localTime, playbackRate }: 
     audio.muted = clip.muted;
     audio.volume = clip.muted ? 0 : Math.min(1, clip.volume);
 
+    const clipChanged = lastClipIdRef.current !== clip.id;
+    lastClipIdRef.current = clip.id;
+    const playStarting = isPlaying && !wasPlayingRef.current;
+    wasPlayingRef.current = isPlaying;
+
     const targetTime = clip.sourceIn + localTime;
-    if (Math.abs(audio.currentTime - targetTime) > 0.08) {
+    const drift = Math.abs(audio.currentTime - targetTime);
+    const now = performance.now();
+
+    // The audio element plays at its own steady rate once started. The React
+    // playhead, driven by the main video's `timeupdate` events, advances in
+    // 100–250 ms hops, so a tight tolerance forces constant seek-glitch cycles
+    // even when the audio is actually in sync. Only re-seek on transitions
+    // (play start, clip change) or when drift is large enough to be audible,
+    // and rate-limit drift corrections to avoid stutter.
+    const shouldSync =
+      playStarting ||
+      clipChanged ||
+      (drift > 0.3 && now - lastSeekAtRef.current > 800);
+
+    if (shouldSync) {
       try {
         audio.currentTime = targetTime;
+        lastSeekAtRef.current = now;
       } catch {
         // Audio not ready yet; will sync on next pass.
       }
@@ -463,9 +535,123 @@ function PreviewLayerAudio({ asset, clip, isPlaying, localTime, playbackRate }: 
     } else {
       audio.pause();
     }
-  }, [clip.muted, clip.sourceIn, clip.volume, isPlaying, localTime, playbackRate]);
+  }, [clip.id, clip.muted, clip.sourceIn, clip.volume, isPlaying, localTime, playbackRate]);
 
   return <audio preload="auto" ref={layerAudioRef} src={asset.playbackUrl} />;
+}
+
+const TEXT_FONT_STACK_BY_ID = new Map(TEXT_FONT_FAMILIES.map((font) => [font.id, font.stack]));
+
+// Per-row virtualization: slice the pre-sorted clip list to only those whose
+// [timelineStart, timelineEnd] overlap the viewport time window. Binary search
+// for the first clip whose end >= viewport.start, then linearly walk forward
+// until start > viewport.end. With sorted input this is O(log n + visible).
+function filterClipsInViewport(sortedClips: TimelineClip[], viewport: { end: number; start: number }): TimelineClip[] {
+  if (sortedClips.length === 0) return sortedClips;
+  if (!Number.isFinite(viewport.end)) return sortedClips;
+
+  let lo = 0;
+  let hi = sortedClips.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    const clip = sortedClips[mid];
+    const end = clip.timelineStart + Math.max(0, clip.sourceOut - clip.sourceIn);
+    if (end < viewport.start) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+
+  const visible: TimelineClip[] = [];
+  for (let i = lo; i < sortedClips.length; i += 1) {
+    const clip = sortedClips[i];
+    if (clip.timelineStart > viewport.end) break;
+    visible.push(clip);
+  }
+  return visible;
+}
+
+function filterTextOverlaysInViewport(sortedOverlays: TextOverlay[], viewport: { end: number; start: number }): TextOverlay[] {
+  if (sortedOverlays.length === 0) return sortedOverlays;
+  if (!Number.isFinite(viewport.end)) return sortedOverlays;
+
+  let lo = 0;
+  let hi = sortedOverlays.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (sortedOverlays[mid].end < viewport.start) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+
+  const visible: TextOverlay[] = [];
+  for (let i = lo; i < sortedOverlays.length; i += 1) {
+    const overlay = sortedOverlays[i];
+    if (overlay.start > viewport.end) break;
+    visible.push(overlay);
+  }
+  return visible;
+}
+
+function getFontStack(id: TextFontFamilyId): string {
+  return TEXT_FONT_STACK_BY_ID.get(id) ?? TEXT_FONT_FAMILIES[0].stack;
+}
+
+function applyTextCase(text: string, textCase: TextOverlay['textCase']): string {
+  if (textCase === 'upper') return text.toUpperCase();
+  if (textCase === 'lower') return text.toLowerCase();
+  return text;
+}
+
+function buildPreviewTextStyle(overlay: TextOverlay): CSSProperties {
+  const transforms: string[] = [];
+  if (overlay.align === 'center') {
+    transforms.push('translate(-50%, -50%)');
+  } else if (overlay.align === 'right') {
+    transforms.push('translate(-100%, -50%)');
+  } else {
+    transforms.push('translateY(-50%)');
+  }
+  if (overlay.rotation) transforms.push(`rotate(${overlay.rotation}deg)`);
+  if (overlay.skewX || overlay.skewY) transforms.push(`skew(${overlay.skewX}deg, ${overlay.skewY}deg)`);
+
+  const shadowParts: string[] = [];
+  if (overlay.shadowBlur > 0 || overlay.shadowOffsetX !== 0 || overlay.shadowOffsetY !== 0) {
+    shadowParts.push(`${overlay.shadowOffsetX}px ${overlay.shadowOffsetY}px ${overlay.shadowBlur}px ${overlay.shadowColor}`);
+  }
+
+  const style: CSSProperties = {
+    color: overlay.color,
+    fontFamily: getFontStack(overlay.fontFamily),
+    fontSize: `${overlay.size}px`,
+    fontStyle: overlay.italic ? 'italic' : 'normal',
+    fontWeight: overlay.bold ? 800 : 500,
+    left: `${overlay.x * 100}%`,
+    letterSpacing: `${overlay.letterSpacing}px`,
+    lineHeight: overlay.lineHeight,
+    opacity: overlay.opacity,
+    textAlign: overlay.align,
+    textDecoration: overlay.underline ? 'underline' : 'none',
+    textShadow: shadowParts.join(', ') || 'none',
+    top: `${overlay.y * 100}%`,
+    transform: transforms.join(' '),
+  };
+
+  if (overlay.backgroundColor && overlay.backgroundColor !== 'transparent' && !overlay.backgroundColor.endsWith('00')) {
+    style.background = overlay.backgroundColor;
+    style.padding = '6px 12px';
+    style.borderRadius = '4px';
+  }
+
+  if (overlay.strokeWidth > 0) {
+    (style as CSSProperties & { WebkitTextStrokeColor?: string; WebkitTextStrokeWidth?: string }).WebkitTextStrokeColor = overlay.strokeColor;
+    (style as CSSProperties & { WebkitTextStrokeColor?: string; WebkitTextStrokeWidth?: string }).WebkitTextStrokeWidth = `${overlay.strokeWidth}px`;
+  }
+
+  return style;
 }
 
 function pickTimelineClipThumbnails(thumbnails: Array<TimelineThumbnail | null>, clip: TimelineClip) {
@@ -551,12 +737,22 @@ function EditorWorkspace({
 
   const attachVideoRef = useCallback((element: HTMLVideoElement | null) => {
     videoRef.current = element;
-    activeMediaRef.current = element;
+    // Audio primary owns the master clock when an audio clip is active.
+    // Only adopt the video element when audio primary isn't mounted.
+    if (element && !audioPrimaryRef.current) {
+      activeMediaRef.current = element;
+    } else if (!element && activeMediaRef.current === videoRef.current) {
+      activeMediaRef.current = audioPrimaryRef.current;
+    }
   }, []);
 
   const attachAudioPrimaryRef = useCallback((element: HTMLAudioElement | null) => {
     audioPrimaryRef.current = element;
-    activeMediaRef.current = element;
+    if (element) {
+      activeMediaRef.current = element;
+    } else if (videoRef.current) {
+      activeMediaRef.current = videoRef.current;
+    }
   }, []);
   const activePlaybackRef = useRef<{
     clipEnd: number;
@@ -603,13 +799,37 @@ function EditorWorkspace({
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [rightPanelTab, setRightPanelTab] = useState<'chat' | 'inspector'>('inspector');
   const [snapEnabled, setSnapEnabled] = useState(true);
+  // Cached transcripts keyed by asset fingerprint. Lives in App so both the
+  // Inspector (display + transcribe button) and the chat context builder can
+  // read it without prop-drilling. Mirror also lives in IndexedDB so reloads
+  // don't lose work.
+  const [assetTranscripts, setAssetTranscripts] = useState<Record<string, StoredAssetTranscript>>({});
+  const [transcribingFingerprints, setTranscribingFingerprints] = useState<Set<string>>(() => new Set());
+  const [transcribeError, setTranscribeError] = useState<string | null>(null);
+  // Beat-detection cache — same shape as transcripts but stored separately so
+  // we can run/refresh them independently. Survives reload via IndexedDB.
+  const [assetBeats, setAssetBeats] = useState<Record<string, StoredBeatData>>({});
+  const [detectingBeatsFingerprints, setDetectingBeatsFingerprints] = useState<Set<string>>(() => new Set());
+  const [beatError, setBeatError] = useState<string | null>(null);
   const snapIndicatorRef = useRef<HTMLDivElement>(null);
 
   const present = project.present;
   const duration = useMemo(() => getProjectDuration(present), [present]);
-  const activeLayerTimelines = useMemo(() => getVideoClipsAtTime(present, playhead), [present, playhead]);
-  const activeAudioLayerTimelines = useMemo(() => getAudioClipsAtTime(present, playhead), [present, playhead]);
-  const activeTextOverlays = useMemo(() => getActiveTextOverlays(present, playhead), [present, playhead]);
+  // Memoized timeline index — built once per state change rather than once per
+  // playhead frame. Indexed selectors below are O(log clips) instead of O(n).
+  const timelineIndex = useMemo(() => buildTimelineIndex(present), [present.clips, present.textOverlays, present.tracks]);
+  const activeLayerTimelines = useMemo(
+    () => getVideoClipsAtTimeFromIndex(timelineIndex, present.tracks, playhead),
+    [present.tracks, timelineIndex, playhead],
+  );
+  const activeAudioLayerTimelines = useMemo(
+    () => getAudioClipsAtTimeFromIndex(timelineIndex, present.tracks, playhead),
+    [present.tracks, timelineIndex, playhead],
+  );
+  const activeTextOverlays = useMemo(
+    () => getActiveTextOverlaysFromIndex(timelineIndex, present.textOverlays, playhead),
+    [present.textOverlays, timelineIndex, playhead],
+  );
   const activeTimeline = useMemo(
     () =>
       activeLayerTimelines[activeLayerTimelines.length - 1] ??
@@ -627,6 +847,369 @@ function EditorWorkspace({
   const selectedAsset = useMemo(() => getAssetById(present, present.selectedAssetId), [present]);
   const activeClip = activeTimeline?.clip ?? null;
   const activeAsset = useMemo(() => getClipAsset(present, activeClip), [activeClip, present]);
+
+  // Ref-mirror of state that ChatPanel snapshots at submit time. Refs (vs.
+  // props) keep the panel from re-rendering on every playhead tick.
+  const chatContextRef = useRef({
+    activeClipId: activeClip?.id ?? null,
+    assetBeats,
+    assetTranscripts,
+    playhead,
+    present,
+    projectName,
+    projectSettings,
+  });
+  chatContextRef.current = {
+    activeClipId: activeClip?.id ?? null,
+    assetBeats,
+    assetTranscripts,
+    playhead,
+    present,
+    projectName,
+    projectSettings,
+  };
+  const getChatContext = useCallback(() => {
+    const snapshot = chatContextRef.current;
+    if (snapshot.present.clips.length === 0) {
+      return null;
+    }
+    // Surface transcripts of clips currently at the playhead. We deliberately
+    // cap the volume (max 6 segments per clip, 1500 chars total) so the
+    // context block stays compact even on long timelines — the goal is to
+    // give the model voice-over awareness, not dump every word ever spoken.
+    const transcripts: Array<{
+      assetId: string;
+      clipId: string;
+      excerpt: string;
+      language: string | null;
+    }> = [];
+    let totalChars = 0;
+    for (const clip of snapshot.present.clips) {
+      if (totalChars > 6000) break;
+      const overlapping =
+        snapshot.playhead >= clip.timelineStart &&
+        snapshot.playhead <= clip.timelineStart + (clip.sourceOut - clip.sourceIn) + 4;
+      if (!overlapping) continue;
+      const asset = snapshot.present.assets.find((a) => a.id === clip.assetId);
+      if (!asset) continue;
+      const fingerprint = createMediaFingerprint(asset.file, asset.duration);
+      const transcript = snapshot.assetTranscripts[fingerprint];
+      if (!transcript) continue;
+      const inRange = transcript.segments
+        .filter((seg) => seg.end >= clip.sourceIn - 1 && seg.start <= clip.sourceOut + 1)
+        .slice(0, 6)
+        .map((seg) => `[${seg.start.toFixed(2)}-${seg.end.toFixed(2)}] ${seg.text.trim()}`)
+        .join('\n');
+      const excerpt = inRange || transcript.text.slice(0, 1500);
+      transcripts.push({ assetId: asset.id, clipId: clip.id, excerpt, language: transcript.language });
+      totalChars += excerpt.length;
+    }
+    // Beat-grid context: list every clip that has beats and a small set of
+    // timeline-projected beat positions near the playhead. The model uses
+    // these to land cuts on beats via apply_eal.
+    const beatContext: Array<{
+      assetId: string;
+      bpm: number | null;
+      clipId: string;
+      timelineBeats: number[];
+    }> = [];
+    for (const clip of snapshot.present.clips) {
+      const asset = snapshot.present.assets.find((a) => a.id === clip.assetId);
+      if (!asset) continue;
+      const fp = createMediaFingerprint(asset.file, asset.duration);
+      const data = snapshot.assetBeats[fp];
+      if (!data) continue;
+      const clipDuration = Math.max(0, clip.sourceOut - clip.sourceIn);
+      const timelineBeats: number[] = [];
+      for (const beat of data.beats) {
+        if (beat < clip.sourceIn || beat > clip.sourceOut) continue;
+        const time = clip.timelineStart + (beat - clip.sourceIn);
+        if (time <= clip.timelineStart + clipDuration + 0.0005) {
+          timelineBeats.push(Number(time.toFixed(3)));
+        }
+      }
+      // Trim to a reasonable window — first 64 beats from this clip is plenty
+      // for the model to spot the grid.
+      beatContext.push({
+        assetId: asset.id,
+        bpm: data.bpm,
+        clipId: clip.id,
+        timelineBeats: timelineBeats.slice(0, 64),
+      });
+    }
+
+    return {
+      activeClipId: snapshot.activeClipId,
+      beats: beatContext,
+      editArray: createEditArrayFromRuntime(snapshot.present, snapshot.projectSettings, snapshot.projectName),
+      playheadSeconds: snapshot.playhead,
+      projectName: snapshot.projectName,
+      selectedClipId: snapshot.present.selectedClipId,
+      selectedTextId: snapshot.present.selectedTextId,
+      selectedTrackId: snapshot.present.selectedTrackId,
+      transcripts,
+    };
+  }, []);
+
+  // Single-tool dispatcher: the model emits a complete new EAL program; we
+  // compile it through the existing editCompiler → editRuntime pipeline (the
+  // same one the EAL inspector uses), then dispatch APPLY_EAL with the
+  // resulting ProjectPresent so it lands as one undoable history step.
+  //
+  // Why one tool instead of many: anything EAL can represent is reachable;
+  // new editor features become available to the model for free as soon as
+  // they round-trip through EAL; the model gets to plan holistically rather
+  // than chaining narrow primitives.
+  const applyChatToolCall = useCallback((call: ChatToolCall): ChatToolResult => {
+    if (call.name !== 'apply_eal') {
+      return { error: `unsupported tool: ${call.name}`, ok: false };
+    }
+
+    const args = call.arguments as Record<string, unknown>;
+    const program = args.program;
+    if (!Array.isArray(program)) {
+      return { error: '`program` must be an EAL array', ok: false };
+    }
+
+    try {
+      const plan = compileEditArrayProgram(program);
+      const compileErrors = plan.ir.diagnostics.filter((d) => d.severity === 'error');
+      if (compileErrors.length > 0) {
+        return { error: compileErrors.map((d) => d.message).join('; '), ok: false };
+      }
+
+      const result = executeEditPlan(plan, chatContextRef.current.present);
+      const runtimeErrors = result.diagnostics.filter((d) => d.severity === 'error');
+      if (runtimeErrors.length > 0) {
+        return { error: runtimeErrors.map((d) => d.message).join('; '), ok: false };
+      }
+
+      // Preserve selection so the user doesn't lose context after an apply.
+      const preserved: ProjectPresent = {
+        ...result.project,
+        selectedAssetId: chatContextRef.current.present.selectedAssetId,
+        selectedClipId: result.project.clips.some((c) => c.id === chatContextRef.current.present.selectedClipId)
+          ? chatContextRef.current.present.selectedClipId
+          : null,
+        selectedTextId: result.project.textOverlays.some((t) => t.id === chatContextRef.current.present.selectedTextId)
+          ? chatContextRef.current.present.selectedTextId
+          : null,
+        selectedTrackId: result.project.tracks.some((t) => t.id === chatContextRef.current.present.selectedTrackId)
+          ? chatContextRef.current.present.selectedTrackId
+          : null,
+      };
+
+      dispatch({ nextProject: preserved, type: 'APPLY_EAL' });
+      return { ok: true };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'apply_eal failed', ok: false };
+    }
+  }, []);
+
+  // Transcript management. Hydrate cached transcripts from IndexedDB on each
+  // new fingerprint we see, kick off STT on user request, persist results so
+  // they survive reloads and re-imports of the same file.
+  useEffect(() => {
+    const unknown: string[] = [];
+    for (const asset of present.assets) {
+      const fp = createMediaFingerprint(asset.file, asset.duration);
+      if (!(fp in assetTranscripts)) {
+        unknown.push(fp);
+      }
+    }
+    if (unknown.length === 0) return;
+    let cancelled = false;
+    void Promise.all(unknown.map((fp) => getAssetTranscript(fp).then((value) => ({ fp, value })))).then((rows) => {
+      if (cancelled) return;
+      const next: Record<string, StoredAssetTranscript> = {};
+      for (const { fp, value } of rows) {
+        if (value) next[fp] = value;
+      }
+      if (Object.keys(next).length === 0) return;
+      setAssetTranscripts((current) => ({ ...current, ...next }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [assetTranscripts, present.assets]);
+
+  const transcribeAsset = useCallback(
+    async (assetId: string) => {
+      const asset = present.assets.find((candidate) => candidate.id === assetId);
+      if (!asset || !asset.file) return;
+      const fingerprint = createMediaFingerprint(asset.file, asset.duration);
+      setTranscribeError(null);
+      setTranscribingFingerprints((current) => {
+        const next = new Set(current);
+        next.add(fingerprint);
+        return next;
+      });
+      try {
+        const transcript = await transcribeFile(asset.file, asset.name);
+        await putAssetTranscript(fingerprint, transcript);
+        setAssetTranscripts((current) => ({ ...current, [fingerprint]: transcript }));
+      } catch (err) {
+        setTranscribeError(err instanceof Error ? err.message : 'Transcription failed');
+      } finally {
+        setTranscribingFingerprints((current) => {
+          const next = new Set(current);
+          next.delete(fingerprint);
+          return next;
+        });
+      }
+    },
+    [present.assets],
+  );
+
+  // Assets without a cached transcript. Used both for the badge count on the
+  // Transcribe-All button and for skipping work that's already done.
+  const assetsMissingTranscripts = useMemo(
+    () =>
+      present.assets.filter((asset) => {
+        if (!asset.file) return false;
+        const fp = createMediaFingerprint(asset.file, asset.duration);
+        return !assetTranscripts[fp];
+      }),
+    [assetTranscripts, present.assets],
+  );
+
+  const transcribeAllAssets = useCallback(async () => {
+    // Process sequentially. Local whisper-cli is CPU-bound — kicking off
+    // multiple concurrent transcriptions would just thrash the same cores
+    // and make every job slower instead of faster.
+    for (const asset of assetsMissingTranscripts) {
+      await transcribeAsset(asset.id);
+    }
+  }, [assetsMissingTranscripts, transcribeAsset]);
+
+  // --- Beat detection (mirrors the transcript flow) ---
+  useEffect(() => {
+    const unknown: string[] = [];
+    for (const asset of present.assets) {
+      const fp = createMediaFingerprint(asset.file, asset.duration);
+      if (!(fp in assetBeats)) unknown.push(fp);
+    }
+    if (unknown.length === 0) return;
+    let cancelled = false;
+    void Promise.all(unknown.map((fp) => getAssetBeats(fp).then((value) => ({ fp, value })))).then((rows) => {
+      if (cancelled) return;
+      const next: Record<string, StoredBeatData> = {};
+      for (const { fp, value } of rows) {
+        if (value) next[fp] = value;
+      }
+      if (Object.keys(next).length === 0) return;
+      setAssetBeats((current) => ({ ...current, ...next }));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [assetBeats, present.assets]);
+
+  const detectAssetBeats = useCallback(
+    async (assetId: string) => {
+      const asset = present.assets.find((candidate) => candidate.id === assetId);
+      if (!asset || !asset.file) return;
+      const fingerprint = createMediaFingerprint(asset.file, asset.duration);
+      setBeatError(null);
+      setDetectingBeatsFingerprints((current) => {
+        const next = new Set(current);
+        next.add(fingerprint);
+        return next;
+      });
+      try {
+        const result = await detectBeats(asset.file);
+        await putAssetBeats(fingerprint, result);
+        setAssetBeats((current) => ({ ...current, [fingerprint]: result }));
+      } catch (err) {
+        setBeatError(err instanceof Error ? err.message : 'Beat detection failed');
+      } finally {
+        setDetectingBeatsFingerprints((current) => {
+          const next = new Set(current);
+          next.delete(fingerprint);
+          return next;
+        });
+      }
+    },
+    [present.assets],
+  );
+
+  const assetsMissingBeats = useMemo(
+    () =>
+      present.assets.filter((asset) => {
+        if (!asset.file) return false;
+        const fp = createMediaFingerprint(asset.file, asset.duration);
+        return !assetBeats[fp];
+      }),
+    [assetBeats, present.assets],
+  );
+
+  const detectAllBeats = useCallback(async () => {
+    for (const asset of assetsMissingBeats) {
+      await detectAssetBeats(asset.id);
+    }
+  }, [assetsMissingBeats, detectAssetBeats]);
+
+  // Project all clip-local beats onto timeline time so snap targets can use
+  // them directly. We project once per state change rather than per drag tick.
+  const timelineBeatTargets = useMemo(() => {
+    const out: number[] = [];
+    for (const clip of present.clips) {
+      const asset = present.assets.find((a) => a.id === clip.assetId);
+      if (!asset?.file) continue;
+      const fp = createMediaFingerprint(asset.file, asset.duration);
+      const data = assetBeats[fp];
+      if (!data) continue;
+      const clipDuration = Math.max(0, clip.sourceOut - clip.sourceIn);
+      for (const beat of data.beats) {
+        if (beat < clip.sourceIn || beat > clip.sourceOut) continue;
+        const timelineTime = clip.timelineStart + (beat - clip.sourceIn);
+        if (timelineTime <= clip.timelineStart + clipDuration + 0.0005) {
+          out.push(timelineTime);
+        }
+      }
+    }
+    return out;
+  }, [assetBeats, present.assets, present.clips]);
+
+  // Sticky asset for the primary <video> element: keep the last video asset
+  // mounted across gaps so we don't pay the unmount-remount cost (decoder
+  // teardown, metadata re-parse, keyframe re-seek). Gap UX: video pauses on
+  // its last frame and the viewer overlays black; playhead clock keeps moving.
+  const stickyVideoAssetRef = useRef<ProjectAsset | null>(null);
+  const lastVideoAssetOnTimeline = useMemo(() => {
+    if (activeAsset?.kind === 'video') {
+      return activeAsset;
+    }
+    // No active video clip right now — fall back to whichever video asset
+    // a timeline clip references, preferring the one we were just using.
+    const stickyId = stickyVideoAssetRef.current?.id;
+    if (stickyId) {
+      const stickyClipStillExists = present.clips.some((clip) => clip.assetId === stickyId);
+      if (stickyClipStillExists) {
+        const reused = present.assets.find((asset) => asset.id === stickyId);
+        if (reused) return reused;
+      }
+    }
+    for (const clip of present.clips) {
+      const asset = present.assets.find((candidate) => candidate.id === clip.assetId);
+      if (asset && asset.kind === 'video') {
+        return asset;
+      }
+    }
+    return null;
+  }, [activeAsset, present]);
+  useEffect(() => {
+    if (lastVideoAssetOnTimeline) {
+      stickyVideoAssetRef.current = lastVideoAssetOnTimeline;
+    }
+  }, [lastVideoAssetOnTimeline]);
+  const lastAudioAssetOnTimeline = useMemo(() => {
+    if (activeAsset?.kind === 'audio' && !lastVideoAssetOnTimeline) {
+      return activeAsset;
+    }
+    return null;
+  }, [activeAsset, lastVideoAssetOnTimeline]);
+  const isInVideoGap = activeClip ? activeAsset?.kind !== 'video' && Boolean(lastVideoAssetOnTimeline) : Boolean(lastVideoAssetOnTimeline);
   const selectedClipAsset = useMemo(() => getClipAsset(present, selectedClip), [present, selectedClip]);
   const activeEffectSettings = activeClip?.effects ?? DEFAULT_EFFECT_SETTINGS;
   const activeEffects = hasActiveEffects(activeEffectSettings);
@@ -642,10 +1225,69 @@ function EditorWorkspace({
   );
   const videoTracksHeight = videoTracks.length * (TIMELINE_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
   const audioTracksHeight = audioTracks.length * (TIMELINE_AUDIO_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
-  const textTracksHeight = textTracks.length * (TIMELINE_TEXT_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
   const audioTracksTop = TIMELINE_TRACK_TOP + videoTracksHeight;
   const textTracksTop = audioTracksTop + audioTracksHeight;
-  const timelineContentHeight = textTracksTop + Math.max(textTracksHeight, 0) + 24;
+  // Timeline viewport in TIME units (seconds). Used to virtualize per-row
+  // clip rendering: a row renders only the clips that overlap this window,
+  // not the entire `present.clips` list. With 500+ clips, this is the
+  // difference between rendering 500 DOM buttons and rendering ~10.
+  const [timelineViewportTime, setTimelineViewportTime] = useState<{ end: number; start: number }>({ end: Infinity, start: 0 });
+  const timelineViewportRafRef = useRef<number | null>(null);
+  useEffect(() => {
+    const scrollEl = timelineScrollRef.current;
+    if (!scrollEl) return;
+
+    const computeViewport = () => {
+      timelineViewportRafRef.current = null;
+      const leftPx = scrollEl.scrollLeft;
+      const widthPx = scrollEl.clientWidth;
+      const overscanPx = Math.max(240, widthPx * 0.25);
+      const startPx = Math.max(0, leftPx - overscanPx - TIMELINE_LABEL_WIDTH);
+      const endPx = leftPx + widthPx + overscanPx - TIMELINE_LABEL_WIDTH;
+      const pixelsPerSecond = TIMELINE_PIXELS_PER_SECOND * timelineZoom;
+      setTimelineViewportTime({
+        end: endPx / pixelsPerSecond,
+        start: startPx / pixelsPerSecond,
+      });
+    };
+
+    const onScroll = () => {
+      if (timelineViewportRafRef.current !== null) return;
+      timelineViewportRafRef.current = window.requestAnimationFrame(computeViewport);
+    };
+
+    computeViewport();
+    scrollEl.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
+
+    return () => {
+      scrollEl.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onScroll);
+      if (timelineViewportRafRef.current !== null) {
+        window.cancelAnimationFrame(timelineViewportRafRef.current);
+        timelineViewportRafRef.current = null;
+      }
+    };
+  }, [timelineZoom]);
+
+  const trackLayout = useMemo(() => {
+    const map = new Map<string, { height: number; kind: 'audio' | 'text' | 'video'; top: number }>();
+    let cursor = TIMELINE_TRACK_TOP;
+    for (const track of videoTracks) {
+      map.set(track.id, { height: TIMELINE_TRACK_HEIGHT, kind: 'video', top: cursor });
+      cursor += TIMELINE_TRACK_HEIGHT + TIMELINE_TRACK_GAP;
+    }
+    for (const track of audioTracks) {
+      map.set(track.id, { height: TIMELINE_AUDIO_TRACK_HEIGHT, kind: 'audio', top: cursor });
+      cursor += TIMELINE_AUDIO_TRACK_HEIGHT + TIMELINE_TRACK_GAP;
+    }
+    for (const track of textTracks) {
+      map.set(track.id, { height: TIMELINE_TEXT_TRACK_HEIGHT, kind: 'text', top: cursor });
+      cursor += TIMELINE_TEXT_TRACK_HEIGHT + TIMELINE_TRACK_GAP;
+    }
+    return { layout: map, totalHeight: cursor };
+  }, [audioTracks, textTracks, videoTracks]);
+  const timelineContentHeight = trackLayout.totalHeight + 24;
   const timelineWidth = Math.max(
     TIMELINE_MIN_WIDTH,
     getVirtualTimelineWidth(Math.ceil(duration || 1), timelineZoom),
@@ -668,8 +1310,9 @@ function EditorWorkspace({
   const editArrayText = useMemo(() => (editArray ? stringifyEditArray(editArray) : ''), [editArray]);
   const [viewerSize, setViewerSize] = useState({ height: 0, width: 0 });
   const previewFrameStyle = useMemo(() => {
-    const mediaWidth = Math.max(1, activeAsset?.width || projectSettings.width || 16);
-    const mediaHeight = Math.max(1, activeAsset?.height || projectSettings.height || 9);
+    const refAsset = activeAsset ?? lastVideoAssetOnTimeline ?? lastAudioAssetOnTimeline;
+    const mediaWidth = Math.max(1, refAsset?.width || projectSettings.width || 16);
+    const mediaHeight = Math.max(1, refAsset?.height || projectSettings.height || 9);
 
     if (viewerSize.width <= 0 || viewerSize.height <= 0) {
       return {
@@ -685,12 +1328,24 @@ function EditorWorkspace({
       height: `${Math.max(1, Math.floor(mediaHeight * scale))}px`,
       width: `${Math.max(1, Math.floor(mediaWidth * scale))}px`,
     };
-  }, [activeAsset?.height, activeAsset?.width, projectSettings.height, projectSettings.width, viewerSize.height, viewerSize.width]);
+  }, [
+    activeAsset?.height,
+    activeAsset?.width,
+    lastAudioAssetOnTimeline?.height,
+    lastAudioAssetOnTimeline?.width,
+    lastVideoAssetOnTimeline?.height,
+    lastVideoAssetOnTimeline?.width,
+    projectSettings.height,
+    projectSettings.width,
+    viewerSize.height,
+    viewerSize.width,
+  ]);
   const getClipTransformStyle = useCallback((clip: TimelineClip | null): CSSProperties => {
-    const transform = clip?.transform ?? { scale: 1, x: 0.5, y: 0.5 };
+    const transform = clip?.transform ?? { rotation: 0, scale: 1, x: 0.5, y: 0.5 };
+    const rotation = transform.rotation ?? 0;
 
     return {
-      transform: `translate3d(${(transform.x - 0.5) * 100}%, ${(transform.y - 0.5) * 100}%, 0) scale(${transform.scale})`,
+      transform: `translate3d(${(transform.x - 0.5) * 100}%, ${(transform.y - 0.5) * 100}%, 0) rotate(${rotation}deg) scale(${transform.scale})`,
     };
   }, []);
   const activeClipTransformStyle = useMemo(() => getClipTransformStyle(activeClip), [activeClip, getClipTransformStyle]);
@@ -737,6 +1392,8 @@ function EditorWorkspace({
     setPlayhead,
     timelineTimeToVideoTime,
     videoRef: activeMediaRef,
+    wallClockMode: isPlaying && !activeTimeline,
+    playbackRate,
   });
 
   const projectStatus = useMemo(() => {
@@ -845,6 +1502,7 @@ function EditorWorkspace({
       const targets = collectSnapTargets(present, {
         excludeClipId: options.excludeClipId ?? null,
         excludeTextId: options.excludeTextId ?? null,
+        extraTargets: timelineBeatTargets,
         includePlayhead: playhead,
       });
 
@@ -864,7 +1522,7 @@ function EditorWorkspace({
       }
       return result.value;
     },
-    [hideSnapIndicator, playhead, present, showSnapIndicatorAt, snapEnabled, timelinePixelsPerSecond],
+    [hideSnapIndicator, playhead, present, showSnapIndicatorAt, snapEnabled, timelineBeatTargets, timelinePixelsPerSecond],
   );
 
   const getCurrentEditTime = useCallback(() => clamp(getVisualTime(), 0, duration || 0), [duration, getVisualTime]);
@@ -1111,15 +1769,11 @@ function EditorWorkspace({
 
     dispatch({
       overlay: {
-        align: 'center',
+        ...DEFAULT_TEXT_OVERLAY,
         end: Math.min(duration, start + 3),
         id: createId('text'),
-        size: 34,
         start,
-        text: 'Text',
         trackId: targetTextTrack,
-        x: 0.5,
-        y: 0.18,
       },
       type: 'ADD_TEXT',
     });
@@ -1231,7 +1885,7 @@ function EditorWorkspace({
       if (mode.type === 'preview-text-scale') {
         dispatchDragAction({
           patch: {
-            size: clamp(mode.startSize + (event.clientX - mode.startX) * 0.3, 12, 96),
+            size: clamp(mode.startSize + (event.clientX - mode.startX) * 0.6, 8, 240),
           },
           record: false,
           textId: mode.textId,
@@ -1262,6 +1916,33 @@ function EditorWorkspace({
           },
           type: 'UPDATE_CLIP_TRANSFORM',
         });
+        return;
+      }
+
+      if (mode.type === 'preview-clip-rotate') {
+        const angle = (Math.atan2(event.clientY - mode.centerY, event.clientX - mode.centerX) * 180) / Math.PI;
+        let next = mode.startRotation + (angle - mode.startAngle);
+        // Wrap into [-180, 180] so the inspector field stays in range.
+        next = ((next + 540) % 360) - 180;
+        dispatchDragAction({
+          clipId: mode.clipId,
+          record: false,
+          transform: { rotation: next },
+          type: 'UPDATE_CLIP_TRANSFORM',
+        });
+        return;
+      }
+
+      if (mode.type === 'preview-text-rotate') {
+        const angle = (Math.atan2(event.clientY - mode.centerY, event.clientX - mode.centerX) * 180) / Math.PI;
+        let next = mode.startRotation + (angle - mode.startAngle);
+        next = ((next + 540) % 360) - 180;
+        dispatchDragAction({
+          patch: { rotation: next },
+          record: false,
+          textId: mode.textId,
+          type: 'UPDATE_TEXT',
+        });
       }
     },
     [dispatchDragAction],
@@ -1273,8 +1954,10 @@ function EditorWorkspace({
     if (
       mode?.type === 'preview-text-move' ||
       mode?.type === 'preview-text-scale' ||
+      mode?.type === 'preview-text-rotate' ||
       mode?.type === 'preview-clip-move' ||
-      mode?.type === 'preview-clip-scale'
+      mode?.type === 'preview-clip-scale' ||
+      mode?.type === 'preview-clip-rotate'
     ) {
       // Flush any throttled drag dispatch before we drop the drag mode so the
       // last position actually lands in the reducer.
@@ -1796,7 +2479,7 @@ function EditorWorkspace({
       dispatch({ clipId: activeClip.id, type: 'SELECT_CLIP' });
       setDragMode({
         clipId: activeClip.id,
-        startTransform: activeClip.transform ?? { scale: 1, x: 0.5, y: 0.5 },
+        startTransform: activeClip.transform ?? { rotation: 0, scale: 1, x: 0.5, y: 0.5 },
         startX: event.clientX,
         startY: event.clientY,
         type: 'preview-clip-move',
@@ -1804,6 +2487,50 @@ function EditorWorkspace({
       event.currentTarget.setPointerCapture(event.pointerId);
     },
     [activeClip, setDragMode],
+  );
+
+  const onPreviewClipRotatePointerDown = useCallback(
+    (event: PointerEvent<HTMLSpanElement>) => {
+      if (!activeClip) return;
+      event.stopPropagation();
+      const rect = (event.currentTarget.closest('.clip-transform-box') ?? event.currentTarget).getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const startAngle = (Math.atan2(event.clientY - centerY, event.clientX - centerX) * 180) / Math.PI;
+      dispatch({ clipId: activeClip.id, type: 'SELECT_CLIP' });
+      setDragMode({
+        centerX,
+        centerY,
+        clipId: activeClip.id,
+        startAngle,
+        startRotation: activeClip.transform?.rotation ?? 0,
+        type: 'preview-clip-rotate',
+      });
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [activeClip, setDragMode],
+  );
+
+  const onPreviewTextRotatePointerDown = useCallback(
+    (event: PointerEvent<HTMLSpanElement>, overlay: TextOverlay) => {
+      event.stopPropagation();
+      const host = event.currentTarget.parentElement ?? event.currentTarget;
+      const rect = host.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const startAngle = (Math.atan2(event.clientY - centerY, event.clientX - centerX) * 180) / Math.PI;
+      dispatch({ textId: overlay.id, type: 'SELECT_TEXT' });
+      setDragMode({
+        centerX,
+        centerY,
+        startAngle,
+        startRotation: overlay.rotation,
+        textId: overlay.id,
+        type: 'preview-text-rotate',
+      });
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [setDragMode],
   );
 
   const onPreviewClipScalePointerDown = useCallback(
@@ -2259,7 +2986,17 @@ function EditorWorkspace({
     const clipChanged = previousClipId !== nextClipId;
     previousActiveClipIdRef.current = nextClipId;
 
-    if (!media || !activeTimeline || !activeAsset) {
+    if (!media) {
+      return;
+    }
+
+    // Entering a gap (no active clip) — pause the master so it doesn't keep
+    // playing into un-edited portions of the source. The sticky <video>
+    // element stays mounted on its last frame; the gap overlay covers it.
+    if (!activeTimeline || !activeAsset) {
+      if (clipChanged) {
+        media.pause();
+      }
       return;
     }
 
@@ -2562,6 +3299,34 @@ function EditorWorkspace({
         </div>
 
         <div className="topbar-actions">
+          {assetsMissingTranscripts.length > 0 ? (
+            <button
+              className="button secondary"
+              disabled={transcribingFingerprints.size > 0}
+              onClick={() => void transcribeAllAssets()}
+              title={`Transcribe ${assetsMissingTranscripts.length} clip${assetsMissingTranscripts.length === 1 ? '' : 's'}`}
+              type="button"
+            >
+              <Mic size={15} />
+              {transcribingFingerprints.size > 0
+                ? `Transcribing ${transcribingFingerprints.size}/${assetsMissingTranscripts.length}`
+                : `Transcribe (${assetsMissingTranscripts.length})`}
+            </button>
+          ) : null}
+          {assetsMissingBeats.length > 0 ? (
+            <button
+              className="button secondary"
+              disabled={detectingBeatsFingerprints.size > 0}
+              onClick={() => void detectAllBeats()}
+              title={`Detect beats for ${assetsMissingBeats.length} clip${assetsMissingBeats.length === 1 ? '' : 's'}`}
+              type="button"
+            >
+              <Activity size={15} />
+              {detectingBeatsFingerprints.size > 0
+                ? `Beats ${detectingBeatsFingerprints.size}/${assetsMissingBeats.length}`
+                : `Beats (${assetsMissingBeats.length})`}
+            </button>
+          ) : null}
           <button
             className="icon-button"
             onClick={() => setShowProjectSettings((value) => !value)}
@@ -2704,7 +3469,7 @@ function EditorWorkspace({
           </div>
 
           <div className={`viewer-stage${!hasTimeline ? ' is-empty' : ''}`} ref={viewerStageRef}>
-            {hasTimeline && activeAsset ? (
+            {hasTimeline && (activeAsset || lastVideoAssetOnTimeline || lastAudioAssetOnTimeline) ? (
               <div
                 className="preview-frame"
                 onPointerCancel={endPreviewDirectManipulation}
@@ -2735,26 +3500,30 @@ function EditorWorkspace({
                         ) : null;
                       })
                   : null}
-                {activeAudioLayerTimelines
-                  .filter((timeline) => !(activePrimaryKind === 'audio' && timeline.clip.id === activeTimeline?.clip.id))
-                  .map((timeline) => {
-                    const layerAsset = getClipAsset(present, timeline.clip);
+                {/* PreviewLayerAudio owns every audio-track clip uniformly so the same
+                    <audio> element keeps playing across clip-end / gap / clip-start. No
+                    element swap = no glitch. Primary <audio> only renders for audio-only
+                    timelines (no video anywhere). */}
+                {!(!lastVideoAssetOnTimeline && lastAudioAssetOnTimeline)
+                  ? activeAudioLayerTimelines.map((timeline) => {
+                      const layerAsset = getClipAsset(present, timeline.clip);
 
-                    return layerAsset ? (
-                      <PreviewLayerAudio
-                        asset={layerAsset}
-                        clip={timeline.clip}
-                        isPlaying={isPlaying}
-                        key={timeline.clip.id}
-                        localTime={timeline.localTime}
-                        playbackRate={playbackRate}
-                      />
-                    ) : null;
-                  })}
-                {activeAsset.kind === 'video' ? (
+                      return layerAsset ? (
+                        <PreviewLayerAudio
+                          asset={layerAsset}
+                          clip={timeline.clip}
+                          isPlaying={isPlaying}
+                          key={timeline.clip.id}
+                          localTime={timeline.localTime}
+                          playbackRate={playbackRate}
+                        />
+                      ) : null;
+                    })
+                  : null}
+                {lastVideoAssetOnTimeline ? (
                   <video
                     className={isGpuPreviewActive ? 'is-composited' : undefined}
-                    key={activeAsset.playbackUrl}
+                    key="primary-video"
                     onError={onPreviewPlaybackError}
                     onLoadedMetadata={onPreviewLoadedMetadata}
                     onSeeked={markSeekEnd}
@@ -2762,28 +3531,34 @@ function EditorWorkspace({
                     playsInline
                     preload="auto"
                     ref={attachVideoRef}
-                    src={activeAsset.playbackUrl}
+                    src={lastVideoAssetOnTimeline.playbackUrl}
                     style={activeClipTransformStyle}
                   />
-                ) : (
+                ) : null}
+                {/* Primary <audio> only renders for AUDIO-ONLY timelines (no video
+                    anywhere). When the timeline has video clips, every audio clip plays
+                    through PreviewLayerAudio so no element swap happens at boundaries —
+                    the same <audio> keeps playing across clip-1 → gap → clip-2. */}
+                {!lastVideoAssetOnTimeline && lastAudioAssetOnTimeline ? (
                   <>
                     <div className="audio-only-stage" aria-hidden="true">
                       <Music size={42} />
-                      <strong>{activeAsset.name}</strong>
+                      <strong>{lastAudioAssetOnTimeline.name}</strong>
                       <span>Audio only</span>
                     </div>
                     <audio
-                      key={activeAsset.playbackUrl}
+                      key="primary-audio"
                       onError={onPreviewPlaybackError}
                       onLoadedMetadata={onPreviewLoadedMetadata}
                       onSeeked={markSeekEnd}
                       onTimeUpdate={onPreviewTimeUpdate}
                       preload="auto"
                       ref={attachAudioPrimaryRef}
-                      src={activeAsset.playbackUrl}
+                      src={lastAudioAssetOnTimeline.playbackUrl}
                     />
                   </>
-                )}
+                ) : null}
+                {isInVideoGap ? <div aria-hidden="true" className="viewer-gap-overlay" /> : null}
                 <canvas
                   className={`gpu-canvas${isGpuPreviewActive ? ' is-active' : ''}`}
                   ref={previewCanvasRef}
@@ -2802,6 +3577,11 @@ function EditorWorkspace({
                       className="canvas-scale-handle clip-scale-handle"
                       onPointerDown={onPreviewClipScalePointerDown}
                     />
+                    <span
+                      aria-hidden="true"
+                      className="canvas-rotate-handle clip-rotate-handle"
+                      onPointerDown={onPreviewClipRotatePointerDown}
+                    />
                   </button>
                 ) : null}
                 <div className="text-overlay-layer">
@@ -2816,18 +3596,19 @@ function EditorWorkspace({
                       }}
                       onPointerDown={(event) => onPreviewTextPointerDown(event, overlay)}
                       role="button"
-                      style={{
-                        fontSize: `${overlay.size}px`,
-                        left: `${overlay.x * 100}%`,
-                        top: `${overlay.y * 100}%`,
-                      }}
+                      style={buildPreviewTextStyle(overlay)}
                       tabIndex={0}
                     >
-                      {overlay.text}
+                      {applyTextCase(overlay.text, overlay.textCase)}
                       <span
                         aria-hidden="true"
                         className="canvas-scale-handle text-scale-handle"
                         onPointerDown={(event) => onPreviewTextScalePointerDown(event, overlay)}
+                      />
+                      <span
+                        aria-hidden="true"
+                        className="canvas-rotate-handle text-rotate-handle"
+                        onPointerDown={(event) => onPreviewTextRotatePointerDown(event, overlay)}
                       />
                     </div>
                   ))}
@@ -2899,7 +3680,12 @@ function EditorWorkspace({
             {rightPanelTab === 'inspector' ? (
               <Inspector
                 addAssetToTimeline={() => addAssetToTimeline(selectedAsset?.id ?? null)}
+                assetBeats={assetBeats}
+                assetTranscripts={assetTranscripts}
+                beatError={beatError}
                 capabilities={capabilities}
+                detectAssetBeats={detectAssetBeats}
+                detectingBeatsFingerprints={detectingBeatsFingerprints}
                 deleteSelected={deleteSelected}
                 deleteAssetFromLibrary={deleteAssetFromLibrary}
                 dispatch={dispatch}
@@ -2910,9 +3696,12 @@ function EditorWorkspace({
                 selectedClipAsset={selectedClipAsset}
                 selectedText={selectedText}
                 splitAtPlayhead={splitAtPlayhead}
+                transcribeAsset={transcribeAsset}
+                transcribeError={transcribeError}
+                transcribingFingerprints={transcribingFingerprints}
               />
             ) : (
-              <ChatPanel />
+              <ChatPanel applyToolCall={applyChatToolCall} getContext={getChatContext} />
             )}
           </div>
         </aside>
@@ -3025,9 +3814,11 @@ function EditorWorkspace({
             </div>
             <div aria-hidden="true" className="timeline-snap-indicator" ref={snapIndicatorRef} />
 
-            {videoTracks.map((track, index) => {
-              const top = TIMELINE_TRACK_TOP + index * (TIMELINE_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
-              const trackClips = present.clips.filter((clip) => clip.trackId === track.id);
+            {videoTracks.map((track) => {
+              const slot = trackLayout.layout.get(track.id);
+              const top = slot?.top ?? TIMELINE_TRACK_TOP;
+              const allTrackClips = timelineIndex.clipsByTrack.get(track.id) ?? [];
+              const trackClips = filterClipsInViewport(allTrackClips, timelineViewportTime);
 
               return (
                 <div
@@ -3039,7 +3830,7 @@ function EditorWorkspace({
                       dispatch({ trackId: track.id, type: 'SELECT_TRACK' });
                     }
                   }}
-                  style={{ top: `${top}px` }}
+                  style={{ height: `${slot?.height ?? TIMELINE_TRACK_HEIGHT}px`, top: `${top}px` }}
                 >
                   <div className="track-label-shell">
                     <button
@@ -3068,7 +3859,7 @@ function EditorWorkspace({
                       <Trash2 size={11} />
                     </button>
                   </div>
-                  {trackClips.length === 0 && present.clips.length === 0 && index === 0 ? (
+                  {trackClips.length === 0 && present.clips.length === 0 && videoTracks[0]?.id === track.id ? (
                     <button className="empty-timeline" onClick={() => selectedAsset && addAssetToTimeline(selectedAsset.id, 0, track.id)} type="button">
                       Drag media here or select an asset and add it.
                     </button>
@@ -3107,9 +3898,11 @@ function EditorWorkspace({
               );
             })}
 
-            {audioTracks.map((track, index) => {
-              const top = audioTracksTop + index * (TIMELINE_AUDIO_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
-              const trackClips = present.clips.filter((clip) => clip.trackId === track.id);
+            {audioTracks.map((track) => {
+              const slot = trackLayout.layout.get(track.id);
+              const top = slot?.top ?? audioTracksTop;
+              const allTrackClips = timelineIndex.clipsByTrack.get(track.id) ?? [];
+              const trackClips = filterClipsInViewport(allTrackClips, timelineViewportTime);
 
               return (
                 <div
@@ -3121,7 +3914,7 @@ function EditorWorkspace({
                       dispatch({ trackId: track.id, type: 'SELECT_TRACK' });
                     }
                   }}
-                  style={{ top: `${top}px`, height: `${TIMELINE_AUDIO_TRACK_HEIGHT}px` }}
+                  style={{ height: `${slot?.height ?? TIMELINE_AUDIO_TRACK_HEIGHT}px`, top: `${top}px` }}
                 >
                   <div className="track-label-shell">
                     <button
@@ -3182,9 +3975,11 @@ function EditorWorkspace({
               );
             })}
 
-            {textTracks.map((track, index) => {
-              const top = textTracksTop + index * (TIMELINE_TEXT_TRACK_HEIGHT + TIMELINE_TRACK_GAP);
-              const trackOverlays = present.textOverlays.filter((overlay) => overlay.trackId === track.id);
+            {textTracks.map((track) => {
+              const slot = trackLayout.layout.get(track.id);
+              const top = slot?.top ?? textTracksTop;
+              const allOverlays = timelineIndex.textOverlaysByTrack.get(track.id) ?? [];
+              const trackOverlays = filterTextOverlaysInViewport(allOverlays, timelineViewportTime);
 
               return (
                 <div
@@ -3196,7 +3991,7 @@ function EditorWorkspace({
                       dispatch({ trackId: track.id, type: 'SELECT_TRACK' });
                     }
                   }}
-                  style={{ top: `${top}px`, height: `${TIMELINE_TEXT_TRACK_HEIGHT}px` }}
+                  style={{ height: `${slot?.height ?? TIMELINE_TEXT_TRACK_HEIGHT}px`, top: `${top}px` }}
                 >
                   <div className="track-label-shell">
                     <button
@@ -3738,9 +4533,14 @@ function ProjectSettingsPanel({ editArrayText, onClose, onSettingsChange, settin
 
 type InspectorProps = {
   addAssetToTimeline: () => void;
+  assetBeats: Record<string, StoredBeatData>;
+  assetTranscripts: Record<string, StoredAssetTranscript>;
+  beatError: string | null;
   capabilities: ReturnType<typeof detectMediaCapabilities>;
   deleteAssetFromLibrary: (assetId: string) => void;
   deleteSelected: () => void;
+  detectAssetBeats: (assetId: string) => Promise<void>;
+  detectingBeatsFingerprints: Set<string>;
   dispatch: Dispatch<Parameters<typeof projectReducer>[1]>;
   hasTimeline: boolean;
   project: ProjectPresent;
@@ -3749,13 +4549,127 @@ type InspectorProps = {
   selectedClipAsset: ProjectAsset | null;
   selectedText: TextOverlay | null;
   splitAtPlayhead: () => void;
+  transcribeAsset: (assetId: string) => Promise<void>;
+  transcribeError: string | null;
+  transcribingFingerprints: Set<string>;
 };
+
+type ClipBeatsSectionProps = {
+  asset: ProjectAsset | null;
+  assetBeats: Record<string, StoredBeatData>;
+  detectingFingerprints: Set<string>;
+  error: string | null;
+  onDetect: (assetId: string) => void | Promise<void>;
+};
+
+function ClipBeatsSection({ asset, assetBeats, detectingFingerprints, error, onDetect }: ClipBeatsSectionProps) {
+  if (!asset) return null;
+  const fingerprint = createMediaFingerprint(asset.file, asset.duration);
+  const data = assetBeats[fingerprint] ?? null;
+  const inFlight = detectingFingerprints.has(fingerprint);
+  return (
+    <>
+      <div className="subhead">Beats</div>
+      {data ? (
+        <div className="meta-grid transcript-meta">
+          <span>BPM</span>
+          <strong>{data.bpm ?? '—'}</strong>
+          <span>Beats</span>
+          <strong>{data.beats.length}</strong>
+          <span>Source</span>
+          <strong>{`${Math.round(data.sampleRate / 1000)} kHz`}</strong>
+        </div>
+      ) : (
+        <p className="transcript-empty">No beat grid yet — detect to enable beat-aware snapping and AI cut-on-beat.</p>
+      )}
+      <div className="button-grid">
+        <button
+          className="button secondary"
+          disabled={inFlight}
+          onClick={() => onDetect(asset.id)}
+          type="button"
+        >
+          {inFlight ? 'Detecting…' : data ? 'Re-detect' : 'Detect Beats'}
+        </button>
+      </div>
+      {error ? <p className="transcript-error">{error}</p> : null}
+    </>
+  );
+}
+
+type ClipTranscriptSectionProps = {
+  asset: ProjectAsset | null;
+  assetTranscripts: Record<string, StoredAssetTranscript>;
+  error: string | null;
+  onTranscribe: (assetId: string) => void | Promise<void>;
+  transcribingFingerprints: Set<string>;
+};
+
+function ClipTranscriptSection({ asset, assetTranscripts, error, onTranscribe, transcribingFingerprints }: ClipTranscriptSectionProps) {
+  if (!asset) return null;
+  const fingerprint = createMediaFingerprint(asset.file, asset.duration);
+  const transcript = assetTranscripts[fingerprint] ?? null;
+  const inFlight = transcribingFingerprints.has(fingerprint);
+
+  // Word count: prefer the provider's word array; if empty (whisper.cpp
+  // returns segments-only by default) fall back to a whitespace-split of the
+  // full text so the user sees a meaningful number.
+  let wordCount = 0;
+  if (transcript) {
+    wordCount = transcript.words.length > 0
+      ? transcript.words.length
+      : transcript.text.trim().split(/\s+/).filter(Boolean).length;
+  }
+  const preview = transcript?.text?.trim() ?? '';
+  const previewClipped = preview.length > 320 ? `${preview.slice(0, 320)}…` : preview;
+
+  return (
+    <>
+      <div className="subhead">Transcript</div>
+      {transcript ? (
+        <>
+          <div className="meta-grid transcript-meta">
+            <span>Words</span>
+            <strong>{wordCount.toLocaleString()}</strong>
+            <span>Segments</span>
+            <strong>{transcript.segments.length}</strong>
+            <span>Language</span>
+            <strong>{transcript.language ?? 'auto'}</strong>
+            <span>Model</span>
+            <strong>{transcript.model}</strong>
+          </div>
+          {previewClipped ? <p className="transcript-preview">{previewClipped}</p> : (
+            <p className="transcript-empty">Transcript came back empty — re-run after checking the clip has audible speech.</p>
+          )}
+        </>
+      ) : (
+        <p className="transcript-empty">No transcript yet — run STT to make filler-word and sentence-aware edits possible.</p>
+      )}
+      <div className="button-grid">
+        <button
+          className="button secondary"
+          disabled={inFlight || !fingerprint}
+          onClick={() => onTranscribe(asset.id)}
+          type="button"
+        >
+          {inFlight ? 'Transcribing…' : transcript ? 'Re-run' : 'Transcribe'}
+        </button>
+      </div>
+      {error ? <p className="transcript-error">{error}</p> : null}
+    </>
+  );
+}
 
 function Inspector({
   addAssetToTimeline,
+  assetBeats,
+  assetTranscripts,
+  beatError,
   capabilities,
   deleteAssetFromLibrary,
   deleteSelected,
+  detectAssetBeats,
+  detectingBeatsFingerprints,
   dispatch,
   hasTimeline,
   project,
@@ -3764,6 +4678,9 @@ function Inspector({
   selectedClipAsset,
   selectedText,
   splitAtPlayhead,
+  transcribeAsset,
+  transcribeError,
+  transcribingFingerprints,
 }: InspectorProps) {
   if (selectedText) {
     const textDuration = Math.max(0.1, selectedText.end - selectedText.start);
@@ -3798,8 +4715,10 @@ function Inspector({
 
           <label className="field">
             <span>Content</span>
-            <input
+            <textarea
+              className="text-content-input"
               onChange={(event) => dispatch({ patch: { text: event.target.value }, textId: selectedText.id, type: 'UPDATE_TEXT' })}
+              rows={3}
               value={selectedText.text}
             />
           </label>
@@ -3850,10 +4769,38 @@ function Inspector({
             }
           />
 
-          <div className="subhead">Canvas Position</div>
-          <ControlNumber label="X" max={0.98} min={0.02} step={0.01} value={selectedText.x} onChange={(value) => dispatch({ patch: { x: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
-          <ControlNumber label="Y" max={0.98} min={0.02} step={0.01} value={selectedText.y} onChange={(value) => dispatch({ patch: { y: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
-          <ControlNumber label="Size" max={96} min={12} step={1} value={selectedText.size} onChange={(value) => dispatch({ patch: { size: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <div className="subhead">Typography</div>
+          <FontPicker
+            onChange={(fontFamily) =>
+              dispatch({ patch: { fontFamily }, textId: selectedText.id, type: 'UPDATE_TEXT' })
+            }
+            value={selectedText.fontFamily}
+          />
+          <ControlNumber label="Size" max={240} min={8} step={1} value={selectedText.size} onChange={(value) => dispatch({ patch: { size: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <ControlNumber label="Letter Spacing" max={32} min={-8} step={0.5} value={selectedText.letterSpacing} onChange={(value) => dispatch({ patch: { letterSpacing: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <ControlNumber label="Line Height" max={3} min={0.8} step={0.05} value={selectedText.lineHeight} onChange={(value) => dispatch({ patch: { lineHeight: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <div className="button-row">
+            <button className={`chip${selectedText.bold ? ' is-active' : ''}`} onClick={() => dispatch({ patch: { bold: !selectedText.bold }, textId: selectedText.id, type: 'UPDATE_TEXT' })} title="Bold" type="button">B</button>
+            <button className={`chip${selectedText.italic ? ' is-active' : ''}`} onClick={() => dispatch({ patch: { italic: !selectedText.italic }, textId: selectedText.id, type: 'UPDATE_TEXT' })} title="Italic" type="button"><span style={{ fontStyle: 'italic' }}>I</span></button>
+            <button className={`chip${selectedText.underline ? ' is-active' : ''}`} onClick={() => dispatch({ patch: { underline: !selectedText.underline }, textId: selectedText.id, type: 'UPDATE_TEXT' })} title="Underline" type="button"><span style={{ textDecoration: 'underline' }}>U</span></button>
+          </div>
+          <label className="field">
+            <span>Case</span>
+            <select
+              onChange={(event) =>
+                dispatch({
+                  patch: { textCase: event.target.value as TextOverlay['textCase'] },
+                  textId: selectedText.id,
+                  type: 'UPDATE_TEXT',
+                })
+              }
+              value={selectedText.textCase}
+            >
+              <option value="none">As typed</option>
+              <option value="upper">UPPERCASE</option>
+              <option value="lower">lowercase</option>
+            </select>
+          </label>
           <label className="field">
             <span>Align</span>
             <select
@@ -3871,6 +4818,75 @@ function Inspector({
               <option value="right">Right</option>
             </select>
           </label>
+
+          <div className="subhead">Color & Fill</div>
+          <label className="field field-color">
+            <span>Color</span>
+            <input
+              onChange={(event) => dispatch({ patch: { color: event.target.value }, textId: selectedText.id, type: 'UPDATE_TEXT' })}
+              type="color"
+              value={selectedText.color.length === 9 ? selectedText.color.slice(0, 7) : selectedText.color}
+            />
+          </label>
+          <label className="field field-color">
+            <span>Background</span>
+            <input
+              onChange={(event) => {
+                const hex = event.target.value;
+                const alpha = selectedText.backgroundColor.length === 9 ? selectedText.backgroundColor.slice(-2) : 'ff';
+                dispatch({ patch: { backgroundColor: `${hex}${alpha}` }, textId: selectedText.id, type: 'UPDATE_TEXT' });
+              }}
+              type="color"
+              value={selectedText.backgroundColor.length >= 7 ? selectedText.backgroundColor.slice(0, 7) : '#000000'}
+            />
+          </label>
+          <ControlNumber
+            label="BG Opacity"
+            max={1}
+            min={0}
+            step={0.05}
+            value={selectedText.backgroundColor.length === 9 ? parseInt(selectedText.backgroundColor.slice(-2), 16) / 255 : 1}
+            onChange={(value) => {
+              const base = selectedText.backgroundColor.length >= 7 ? selectedText.backgroundColor.slice(0, 7) : '#000000';
+              const alpha = Math.round(value * 255).toString(16).padStart(2, '0');
+              dispatch({ patch: { backgroundColor: `${base}${alpha}` }, textId: selectedText.id, type: 'UPDATE_TEXT' });
+            }}
+          />
+          <ControlNumber label="Opacity" max={1} min={0} step={0.05} value={selectedText.opacity} onChange={(value) => dispatch({ patch: { opacity: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+
+          <div className="subhead">Stroke</div>
+          <label className="field field-color">
+            <span>Color</span>
+            <input
+              onChange={(event) => dispatch({ patch: { strokeColor: event.target.value }, textId: selectedText.id, type: 'UPDATE_TEXT' })}
+              type="color"
+              value={selectedText.strokeColor.length === 9 ? selectedText.strokeColor.slice(0, 7) : selectedText.strokeColor}
+            />
+          </label>
+          <ControlNumber label="Width" max={16} min={0} step={0.5} value={selectedText.strokeWidth} onChange={(value) => dispatch({ patch: { strokeWidth: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+
+          <div className="subhead">Shadow</div>
+          <label className="field field-color">
+            <span>Color</span>
+            <input
+              onChange={(event) => dispatch({ patch: { shadowColor: event.target.value }, textId: selectedText.id, type: 'UPDATE_TEXT' })}
+              type="color"
+              value={selectedText.shadowColor.length === 9 ? selectedText.shadowColor.slice(0, 7) : selectedText.shadowColor}
+            />
+          </label>
+          <ControlNumber label="Blur" max={32} min={0} step={1} value={selectedText.shadowBlur} onChange={(value) => dispatch({ patch: { shadowBlur: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <ControlNumber label="Offset X" max={32} min={-32} step={1} value={selectedText.shadowOffsetX} onChange={(value) => dispatch({ patch: { shadowOffsetX: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <ControlNumber label="Offset Y" max={32} min={-32} step={1} value={selectedText.shadowOffsetY} onChange={(value) => dispatch({ patch: { shadowOffsetY: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+
+          <div className="subhead">Transform</div>
+          <ControlNumber label="X" max={0.98} min={0.02} step={0.01} value={selectedText.x} onChange={(value) => dispatch({ patch: { x: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <ControlNumber label="Y" max={0.98} min={0.02} step={0.01} value={selectedText.y} onChange={(value) => dispatch({ patch: { y: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <ControlNumber label="Tilt" max={180} min={-180} step={1} value={selectedText.rotation} onChange={(value) => dispatch({ patch: { rotation: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <ControlNumber label="Warp X" max={45} min={-45} step={1} value={selectedText.skewX} onChange={(value) => dispatch({ patch: { skewX: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <ControlNumber label="Warp Y" max={45} min={-45} step={1} value={selectedText.skewY} onChange={(value) => dispatch({ patch: { skewY: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
+          <div className="button-row">
+            <button className="chip" onClick={() => dispatch({ patch: { rotation: 0, skewX: 0, skewY: 0 }, textId: selectedText.id, type: 'UPDATE_TEXT' })} type="button">Reset Transform</button>
+          </div>
 
           <div className="button-grid">
             <button
@@ -3972,6 +4988,7 @@ function Inspector({
               <ControlNumber label="X" max={1} min={0} step={0.01} value={selectedClip.transform.x} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { x: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
               <ControlNumber label="Y" max={1} min={0} step={0.01} value={selectedClip.transform.y} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { y: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
               <ControlNumber label="Scale" max={4} min={0.25} step={0.01} value={selectedClip.transform.scale} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { scale: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+              <ControlNumber label="Rotate" max={180} min={-180} step={1} value={selectedClip.transform.rotation ?? 0} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { rotation: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
             </>
           )}
 
@@ -3995,6 +5012,22 @@ function Inspector({
               <ControlNumber label="Saturation" max={2} min={0} step={0.01} value={selectedClip.effects.saturation} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { saturation: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
             </>
           )}
+
+          <ClipTranscriptSection
+            asset={selectedClipAsset}
+            assetTranscripts={assetTranscripts}
+            error={transcribeError}
+            onTranscribe={transcribeAsset}
+            transcribingFingerprints={transcribingFingerprints}
+          />
+
+          <ClipBeatsSection
+            asset={selectedClipAsset}
+            assetBeats={assetBeats}
+            detectingFingerprints={detectingBeatsFingerprints}
+            error={beatError}
+            onDetect={detectAssetBeats}
+          />
 
           <div className="button-grid">
             <button
@@ -4090,6 +5123,84 @@ function Inspector({
         </div>
       </div>
     </>
+  );
+}
+
+type FontPickerProps = {
+  onChange: (value: TextFontFamilyId) => void;
+  value: TextFontFamilyId;
+};
+
+function FontPicker({ onChange, value }: FontPickerProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const activeFont = TEXT_FONT_FAMILIES.find((font) => font.id === value) ?? TEXT_FONT_FAMILIES[0];
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const onDocPointer = (event: globalThis.PointerEvent) => {
+      const target = event.target as Node;
+      if (menuRef.current?.contains(target) || triggerRef.current?.contains(target)) return;
+      setIsOpen(false);
+    };
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setIsOpen(false);
+    };
+    document.addEventListener('pointerdown', onDocPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDocPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [isOpen]);
+
+  return (
+    <label className="field font-picker">
+      <span>Font</span>
+      <div className="font-picker-shell">
+        <button
+          aria-expanded={isOpen}
+          aria-haspopup="listbox"
+          className="font-picker-trigger"
+          onClick={() => setIsOpen((open) => !open)}
+          ref={triggerRef}
+          style={{ fontFamily: activeFont.stack }}
+          type="button"
+        >
+          {activeFont.label}
+        </button>
+        {isOpen ? (
+          <div className="font-picker-menu" ref={menuRef} role="listbox">
+            {(['sans', 'serif', 'mono', 'display', 'script', 'retro'] as const).map((category) => {
+              const fonts = TEXT_FONT_FAMILIES.filter((font) => font.category === category);
+              if (fonts.length === 0) return null;
+              return (
+                <div className="font-picker-group" key={category}>
+                  <div className="font-picker-group-label">{category.charAt(0).toUpperCase() + category.slice(1)}</div>
+                  {fonts.map((font) => (
+                    <button
+                      aria-selected={font.id === value}
+                      className={`font-picker-option${font.id === value ? ' is-active' : ''}`}
+                      key={font.id}
+                      onClick={() => {
+                        onChange(font.id);
+                        setIsOpen(false);
+                      }}
+                      role="option"
+                      style={{ fontFamily: font.stack }}
+                      type="button"
+                    >
+                      {font.label}
+                    </button>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
+      </div>
+    </label>
   );
 }
 
