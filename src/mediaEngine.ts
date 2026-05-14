@@ -23,7 +23,13 @@ export function detectMediaCapabilities(): MediaCapabilitiesSnapshot {
 }
 
 export function createMediaFingerprint(file: File, duration: number) {
-  return `${file.name}:${file.size}:${file.lastModified}:${duration.toFixed(3)}`;
+  // Stable identity: name + bytes + duration. We deliberately do NOT include
+  // `lastModified` — when projects rehydrate from IndexedDB the file blob is
+  // reconstructed with a fresh `lastModified`, which would change the
+  // fingerprint on every reload and invalidate the transcript cache. The
+  // remaining three fields are enough to disambiguate any realistic media
+  // import.
+  return `${file.name}:${file.size}:${duration.toFixed(3)}`;
 }
 
 export function inferVideoMimeType(name: string, type = '') {

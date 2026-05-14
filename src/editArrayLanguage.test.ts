@@ -9,7 +9,7 @@ import {
   formatEditArrayTime,
 } from './editArrayLanguage';
 import { PROJECT_PRESETS } from './projectPersistence';
-import { DEFAULT_CLIP_TRANSFORM, createDefaultTracks, idleJobStatus, type ProjectPresent } from './projectModel';
+import { DEFAULT_CLIP_TRANSFORM, DEFAULT_TEXT_OVERLAY, createDefaultTracks, idleJobStatus, type ProjectPresent } from './projectModel';
 
 function project(): ProjectPresent {
   const file = new File(['video'], 'main.mp4', { type: 'video/mp4' });
@@ -60,14 +60,13 @@ function project(): ProjectPresent {
     selectedTrackId: tracks[0].id,
     textOverlays: [
       {
-        align: 'center',
+        ...DEFAULT_TEXT_OVERLAY,
         end: 2.5,
         id: 'text-1',
         size: 42,
         start: 0.5,
         text: 'THIS CHANGED EVERYTHING',
         trackId: 'text-1',
-        x: 0.5,
         y: 0.2,
       },
     ],
@@ -119,6 +118,32 @@ describe('Edit Array Language', () => {
     ]);
   });
 
+  it('emits the full text styling envelope (font, color, stroke, shadow, transform, case)', () => {
+    const editArray = createEditArrayFromRuntime(project(), PROJECT_PRESETS.vertical, 'Styling');
+    const textInstruction = editArray.find((instruction) => instruction[0] === 'text');
+
+    expect(textInstruction?.[2]).toEqual(
+      expect.objectContaining({
+        align: 'center',
+        backgroundColor: expect.any(String),
+        bold: true,
+        color: '#ffffff',
+        fontFamily: 'inter',
+        italic: false,
+        letterSpacing: 0,
+        lineHeight: 1.2,
+        opacity: 1,
+        rotation: 0,
+        shadow: expect.objectContaining({ blur: 6, color: '#000000aa', offsetX: 0, offsetY: 1 }),
+        size: 42,
+        skew: { x: 0, y: 0 },
+        stroke: expect.objectContaining({ color: '#000000', width: 0 }),
+        textCase: 'none',
+        underline: false,
+      }),
+    );
+  });
+
   it('fills default effect settings when clips are missing effect fields', () => {
     const editArray = createEditArrayFromRuntime(project(), PROJECT_PRESETS.vertical, 'Defaults');
 
@@ -147,6 +172,12 @@ describe('Edit Array Language', () => {
     expect(EDIT_ARRAY_FIELD_POLICY.TimelineTrack.covered).toContain('visible');
     expect(EDIT_ARRAY_FIELD_POLICY.TimelineClip.covered).toContain('sourceIn');
     expect(EDIT_ARRAY_FIELD_POLICY.TextOverlay.covered).toContain('align');
+    expect(EDIT_ARRAY_FIELD_POLICY.TextOverlay.covered).toContain('fontFamily');
+    expect(EDIT_ARRAY_FIELD_POLICY.TextOverlay.covered).toContain('rotation');
+    expect(EDIT_ARRAY_FIELD_POLICY.TextOverlay.covered).toContain('skewX');
+    expect(EDIT_ARRAY_FIELD_POLICY.TextOverlay.covered).toContain('strokeWidth');
+    expect(EDIT_ARRAY_FIELD_POLICY.TextOverlay.covered).toContain('shadowBlur');
+    expect(EDIT_ARRAY_FIELD_POLICY.TextOverlay.covered).toContain('textCase');
     expect(EDIT_ARRAY_FIELD_POLICY.ProjectAsset.omitted).toContain('playbackUrl');
     expect(EDIT_ARRAY_RESERVED_OPCODES).toContain('keyframe');
     expect(EDIT_ARRAY_RESERVED_OPCODES).toContain('subtitle');

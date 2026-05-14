@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_TEXT_OVERLAY,
   collectSnapTargets,
   createInitialProject,
   getActiveTextOverlays,
@@ -107,12 +108,67 @@ describe('project model', () => {
     expect(state.present.clips).toBe(before);
   });
 
+  it('prevents text overlays on the same track from overlapping when moved', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 30)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, {
+      overlay: { ...DEFAULT_TEXT_OVERLAY, end: 4, id: 't-1', start: 0, text: 'First', trackId: 'text-1' },
+      type: 'ADD_TEXT',
+    });
+    state = projectReducer(state, {
+      overlay: { ...DEFAULT_TEXT_OVERLAY, end: 10, id: 't-2', start: 6, text: 'Second', trackId: 'text-1' },
+      type: 'ADD_TEXT',
+    });
+
+    // Try to drag t-2 onto t-1's range. Expect it to snap immediately after t-1.
+    state = projectReducer(state, { patch: { end: 5, start: 1 }, textId: 't-2', type: 'UPDATE_TEXT' });
+    const moved = state.present.textOverlays.find((overlay) => overlay.id === 't-2')!;
+    expect(moved.start).toBeGreaterThanOrEqual(4);
+    expect(moved.end - moved.start).toBeCloseTo(4, 3);
+  });
+
+  it('snaps ADD_TEXT into a free slot when the requested range collides with another overlay', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 30)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, {
+      overlay: { ...DEFAULT_TEXT_OVERLAY, end: 4, id: 't-1', start: 1, text: 'First', trackId: 'text-1' },
+      type: 'ADD_TEXT',
+    });
+    // Add a second overlay overlapping the first.
+    state = projectReducer(state, {
+      overlay: { ...DEFAULT_TEXT_OVERLAY, end: 5, id: 't-2', start: 2, text: 'Second', trackId: 'text-1' },
+      type: 'ADD_TEXT',
+    });
+    const placed = state.present.textOverlays.find((overlay) => overlay.id === 't-2')!;
+    expect(placed.start).toBeGreaterThanOrEqual(4);
+  });
+
+  it('clamps a trim-only end edit so the overlay cannot expand into a neighbour', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 30)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, {
+      overlay: { ...DEFAULT_TEXT_OVERLAY, end: 3, id: 't-1', start: 1, text: 'Left', trackId: 'text-1' },
+      type: 'ADD_TEXT',
+    });
+    state = projectReducer(state, {
+      overlay: { ...DEFAULT_TEXT_OVERLAY, end: 8, id: 't-2', start: 5, text: 'Right', trackId: 'text-1' },
+      type: 'ADD_TEXT',
+    });
+    // Try to extend t-1 past t-2's start. Should clip to neighbour's start.
+    state = projectReducer(state, { patch: { end: 7 }, textId: 't-1', type: 'UPDATE_TEXT' });
+    const trimmed = state.present.textOverlays.find((overlay) => overlay.id === 't-1')!;
+    expect(trimmed.end).toBeLessThanOrEqual(5);
+  });
+
   it('moves a text overlay to another text track when UPDATE_TEXT includes trackId', () => {
     let state = createInitialProject();
     state = projectReducer(state, { assets: [asset('a', 10)], type: 'ADD_ASSETS' });
     state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
     state = projectReducer(state, {
-      overlay: { align: 'center', end: 4, id: 'text-1', size: 32, start: 1, text: 'Hi', trackId: 'text-1', x: 0.5, y: 0.2 },
+      overlay: { ...DEFAULT_TEXT_OVERLAY, end: 4, id: 'text-1', size: 32, start: 1, text: 'Hi', trackId: 'text-1' },
       type: 'ADD_TEXT',
     });
     state = projectReducer(state, {
@@ -129,15 +185,13 @@ describe('project model', () => {
     let state = projectWithTwoClips();
     state = projectReducer(state, {
       overlay: {
-        align: 'center',
+        ...DEFAULT_TEXT_OVERLAY,
         end: 5,
         id: 'text-a',
         size: 42,
         start: 1,
         text: 'Title',
         trackId: 'text-1',
-        x: 0.5,
-        y: 0.2,
       },
       type: 'ADD_TEXT',
     });
@@ -352,15 +406,13 @@ describe('project model', () => {
     state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
     state = projectReducer(state, {
       overlay: {
-        align: 'center',
+        ...DEFAULT_TEXT_OVERLAY,
         end: 3,
         id: 'text-a',
         size: 32,
         start: 0,
         text: 'Hi',
         trackId: 'text-1',
-        x: 0.5,
-        y: 0.2,
       },
       type: 'ADD_TEXT',
     });

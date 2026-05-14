@@ -89,6 +89,7 @@ export function applyEditRepairPlan(project: ProjectPresent, repairPlan: EditRep
           ? {
               ...clip,
               transform: {
+                rotation: clip.transform.rotation ?? 0,
                 scale: clamp(clip.transform.scale, 0.25, 3),
                 x: clamp(clip.transform.x, 0.05, 0.95),
                 y: clamp(clip.transform.y, 0.05, 0.95),

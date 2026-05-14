@@ -7,6 +7,7 @@ import {
   createInitialProject,
   idleJobStatus,
   normalizeTimelineClips,
+  clampTextOverlay,
   normalizeTimelineClip,
   normalizeTimelineTracks,
   type ProjectAsset,
@@ -286,10 +287,13 @@ export async function hydrateProjectRecord(record: ProjectRecord): Promise<Hydra
   }
   const fallbackTextTrackId =
     textTracks.find((track) => track.kind === 'text')?.id ?? DEFAULT_TEXT_TRACK_ID;
-  textOverlays = textOverlays.map((overlay) => ({
-    ...overlay,
-    trackId: overlay.trackId || fallbackTextTrackId,
-  }));
+  textOverlays = textOverlays.map((overlay) =>
+    clampTextOverlay(
+      { ...overlay, trackId: overlay.trackId || fallbackTextTrackId } as TextOverlay,
+      Number.MAX_SAFE_INTEGER,
+      fallbackTextTrackId,
+    ),
+  );
   const recoveryMessage =
     missingAssetNames.length > 0
       ? `Missing embedded media for ${missingAssetNames.length} asset${missingAssetNames.length === 1 ? '' : 's'}; loaded what could be recovered.`

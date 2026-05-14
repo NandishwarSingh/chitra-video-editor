@@ -2,9 +2,12 @@ import { DEFAULT_EFFECT_SETTINGS, clampEffectSettings, type EffectSettings } fro
 import type { EditArrayProgram } from './editArrayLanguage';
 import type { ProjectSettings } from './projectPersistence';
 import {
+  DEFAULT_TEXT_OVERLAY,
+  TEXT_FONT_FAMILIES,
   clampClipTransform,
   normalizeTimelineTrack,
   type ClipTransform,
+  type TextFontFamilyId,
   type TextOverlay,
   type TimelineClip,
   type TimelineTrack,
@@ -124,6 +127,7 @@ function parseClipTransform(value: unknown): ClipTransform {
   }
 
   return clampClipTransform({
+    rotation: numberValue(value.rotation, 0),
     scale: numberValue(value.scale, 1),
     x: numberValue(value.x, 0.5),
     y: numberValue(value.y, 0.5),
@@ -331,24 +335,52 @@ export function compileEditArrayToIr(program: EditArrayProgram | readonly unknow
       }
 
       const position = isRecord(options.position) ? options.position : {};
+      const shadow = isRecord(options.shadow) ? options.shadow : {};
+      const skew = isRecord(options.skew) ? options.skew : {};
+      const stroke = isRecord(options.stroke) ? options.stroke : {};
       const start = parseEditArrayTime(options.at);
       const end = Math.max(start + 0.1, parseEditArrayTime(options.end) || start + parseEditArrayTime(options.duration));
       const align = options.align === 'left' || options.align === 'right' ? options.align : 'center';
+      const textCase = options.textCase === 'upper' || options.textCase === 'lower' ? options.textCase : 'none';
 
       const layer = stringValue(options.layer, 'text:text-1');
       const trackId = stringValue(options.trackId, layer.replace(/^text:/, '')) || 'text-1';
 
+      const fontFamilyRaw = stringValue(options.fontFamily, DEFAULT_TEXT_OVERLAY.fontFamily);
+      const fontFamily = (TEXT_FONT_FAMILIES.some((font) => font.id === fontFamilyRaw)
+        ? fontFamilyRaw
+        : DEFAULT_TEXT_OVERLAY.fontFamily) as TextFontFamilyId;
+
       ir.textOverlays.push({
         align,
+        backgroundColor: stringValue(options.backgroundColor, DEFAULT_TEXT_OVERLAY.backgroundColor),
+        bold: typeof options.bold === 'boolean' ? options.bold : DEFAULT_TEXT_OVERLAY.bold,
+        color: stringValue(options.color, DEFAULT_TEXT_OVERLAY.color),
         end,
+        fontFamily,
         id: stringValue(options.id, `text-${ir.textOverlays.length + 1}`),
+        italic: typeof options.italic === 'boolean' ? options.italic : DEFAULT_TEXT_OVERLAY.italic,
         layer,
-        size: numberValue(options.size, 34),
+        letterSpacing: numberValue(options.letterSpacing, DEFAULT_TEXT_OVERLAY.letterSpacing),
+        lineHeight: numberValue(options.lineHeight, DEFAULT_TEXT_OVERLAY.lineHeight),
+        opacity: numberValue(options.opacity, DEFAULT_TEXT_OVERLAY.opacity),
+        rotation: numberValue(options.rotation, DEFAULT_TEXT_OVERLAY.rotation),
+        shadowBlur: numberValue(shadow.blur, DEFAULT_TEXT_OVERLAY.shadowBlur),
+        shadowColor: stringValue(shadow.color, DEFAULT_TEXT_OVERLAY.shadowColor),
+        shadowOffsetX: numberValue(shadow.offsetX, DEFAULT_TEXT_OVERLAY.shadowOffsetX),
+        shadowOffsetY: numberValue(shadow.offsetY, DEFAULT_TEXT_OVERLAY.shadowOffsetY),
+        size: numberValue(options.size, DEFAULT_TEXT_OVERLAY.size),
+        skewX: numberValue(skew.x, DEFAULT_TEXT_OVERLAY.skewX),
+        skewY: numberValue(skew.y, DEFAULT_TEXT_OVERLAY.skewY),
         start,
+        strokeColor: stringValue(stroke.color, DEFAULT_TEXT_OVERLAY.strokeColor),
+        strokeWidth: numberValue(stroke.width, DEFAULT_TEXT_OVERLAY.strokeWidth),
         text,
+        textCase,
         trackId,
-        x: numberValue(position.x, 0.5),
-        y: numberValue(position.y, 0.18),
+        underline: typeof options.underline === 'boolean' ? options.underline : DEFAULT_TEXT_OVERLAY.underline,
+        x: numberValue(position.x, DEFAULT_TEXT_OVERLAY.x),
+        y: numberValue(position.y, DEFAULT_TEXT_OVERLAY.y),
       });
       continue;
     }

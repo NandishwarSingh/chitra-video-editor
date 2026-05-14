@@ -62,7 +62,36 @@ export const EDIT_ARRAY_FIELD_POLICY = {
     omitted: [],
   },
   TextOverlay: {
-    covered: ['id', 'text', 'trackId', 'start', 'end', 'x', 'y', 'size', 'align'],
+    covered: [
+      'align',
+      'backgroundColor',
+      'bold',
+      'color',
+      'end',
+      'fontFamily',
+      'id',
+      'italic',
+      'letterSpacing',
+      'lineHeight',
+      'opacity',
+      'rotation',
+      'shadowBlur',
+      'shadowColor',
+      'shadowOffsetX',
+      'shadowOffsetY',
+      'size',
+      'skewX',
+      'skewY',
+      'start',
+      'strokeColor',
+      'strokeWidth',
+      'text',
+      'textCase',
+      'trackId',
+      'underline',
+      'x',
+      'y',
+    ],
     omitted: [],
   },
   TimelineClip: {
@@ -131,13 +160,27 @@ export type EditArrayInstruction =
       {
         align: 'left' | 'center' | 'right';
         at: string;
+        backgroundColor: string;
+        bold: boolean;
+        color: string;
         duration: string;
         end: string;
+        fontFamily: string;
         id: string;
+        italic: boolean;
         layer: string;
+        letterSpacing: number;
+        lineHeight: number;
+        opacity: number;
         position: { x: number; y: number };
+        rotation: number;
+        shadow: { blur: number; color: string; offsetX: number; offsetY: number };
         size: number;
+        skew: { x: number; y: number };
+        stroke: { color: string; width: number };
+        textCase: 'none' | 'upper' | 'lower';
         trackId: string;
+        underline: boolean;
       },
     ];
 
@@ -327,16 +370,41 @@ function createEditArrayProgram(
       {
         align: overlay.align,
         at: formatEditArrayTime(overlay.start),
+        backgroundColor: overlay.backgroundColor,
+        bold: overlay.bold,
+        color: overlay.color,
         duration: formatEditArrayTime(overlay.end - overlay.start),
         end: formatEditArrayTime(overlay.end),
+        fontFamily: overlay.fontFamily,
         id: overlay.id,
+        italic: overlay.italic,
         layer: `text:${trackId}`,
+        letterSpacing: Number(overlay.letterSpacing.toFixed(2)),
+        lineHeight: Number(overlay.lineHeight.toFixed(2)),
+        opacity: Number(overlay.opacity.toFixed(3)),
         position: {
           x: Number(overlay.x.toFixed(3)),
           y: Number(overlay.y.toFixed(3)),
         },
+        rotation: Number(overlay.rotation.toFixed(2)),
+        shadow: {
+          blur: Number(overlay.shadowBlur.toFixed(2)),
+          color: overlay.shadowColor,
+          offsetX: Number(overlay.shadowOffsetX.toFixed(2)),
+          offsetY: Number(overlay.shadowOffsetY.toFixed(2)),
+        },
         size: overlay.size,
+        skew: {
+          x: Number(overlay.skewX.toFixed(2)),
+          y: Number(overlay.skewY.toFixed(2)),
+        },
+        stroke: {
+          color: overlay.strokeColor,
+          width: Number(overlay.strokeWidth.toFixed(2)),
+        },
+        textCase: overlay.textCase,
         trackId,
+        underline: overlay.underline,
       },
     ]);
   });

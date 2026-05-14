@@ -36,6 +36,7 @@ export type TimelineTrack = {
 };
 
 export type ClipTransform = {
+  rotation: number;
   scale: number;
   x: number;
   y: number;
@@ -58,16 +59,104 @@ export type TimelineClip = {
 
 export const DEFAULT_TEXT_TRACK_ID = 'text-1';
 
+export type TextFontFamilyId =
+  | 'inter'
+  | 'system-sans'
+  | 'serif'
+  | 'playfair'
+  | 'mono'
+  | 'bebas'
+  | 'oswald'
+  | 'anton'
+  | 'lobster'
+  | 'pacifico'
+  | 'caveat'
+  | 'dancing'
+  | 'bangers'
+  | 'press-start'
+  | 'space-grotesk';
+
+export const TEXT_FONT_FAMILIES: ReadonlyArray<{
+  category: 'sans' | 'serif' | 'mono' | 'display' | 'script' | 'retro';
+  id: TextFontFamilyId;
+  label: string;
+  stack: string;
+}> = [
+  { category: 'sans', id: 'inter', label: 'Inter', stack: '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' },
+  { category: 'sans', id: 'system-sans', label: 'System Sans', stack: '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif' },
+  { category: 'sans', id: 'space-grotesk', label: 'Space Grotesk', stack: '"Space Grotesk", "Inter", sans-serif' },
+  { category: 'serif', id: 'serif', label: 'Serif', stack: 'Georgia, "Times New Roman", serif' },
+  { category: 'serif', id: 'playfair', label: 'Playfair Display', stack: '"Playfair Display", Georgia, serif' },
+  { category: 'mono', id: 'mono', label: 'Mono', stack: '"JetBrains Mono", "SF Mono", Menlo, Consolas, monospace' },
+  { category: 'display', id: 'bebas', label: 'Bebas Neue', stack: '"Bebas Neue", Impact, "Arial Narrow", sans-serif' },
+  { category: 'display', id: 'oswald', label: 'Oswald', stack: '"Oswald", "Arial Narrow", sans-serif' },
+  { category: 'display', id: 'anton', label: 'Anton', stack: '"Anton", Impact, sans-serif' },
+  { category: 'display', id: 'bangers', label: 'Bangers', stack: '"Bangers", Impact, sans-serif' },
+  { category: 'script', id: 'lobster', label: 'Lobster', stack: '"Lobster", cursive' },
+  { category: 'script', id: 'pacifico', label: 'Pacifico', stack: '"Pacifico", cursive' },
+  { category: 'script', id: 'caveat', label: 'Caveat', stack: '"Caveat", cursive' },
+  { category: 'script', id: 'dancing', label: 'Dancing Script', stack: '"Dancing Script", cursive' },
+  { category: 'retro', id: 'press-start', label: 'Press Start 2P', stack: '"Press Start 2P", "Courier New", monospace' },
+];
+
+export type TextCase = 'none' | 'upper' | 'lower';
+
 export type TextOverlay = {
   align: 'left' | 'center' | 'right';
+  backgroundColor: string;
+  bold: boolean;
+  color: string;
   end: number;
+  fontFamily: TextFontFamilyId;
   id: string;
+  italic: boolean;
+  letterSpacing: number;
+  lineHeight: number;
+  opacity: number;
+  rotation: number;
+  shadowBlur: number;
+  shadowColor: string;
+  shadowOffsetX: number;
+  shadowOffsetY: number;
   size: number;
+  skewX: number;
+  skewY: number;
   start: number;
+  strokeColor: string;
+  strokeWidth: number;
   text: string;
+  textCase: TextCase;
   trackId: string;
+  underline: boolean;
   x: number;
   y: number;
+};
+
+export const DEFAULT_TEXT_OVERLAY: Omit<TextOverlay, 'end' | 'id' | 'start' | 'trackId'> = {
+  align: 'center',
+  backgroundColor: '#00000000',
+  bold: true,
+  color: '#ffffff',
+  fontFamily: 'inter',
+  italic: false,
+  letterSpacing: 0,
+  lineHeight: 1.2,
+  opacity: 1,
+  rotation: 0,
+  shadowBlur: 6,
+  shadowColor: '#000000aa',
+  shadowOffsetX: 0,
+  shadowOffsetY: 1,
+  size: 34,
+  skewX: 0,
+  skewY: 0,
+  strokeColor: '#000000',
+  strokeWidth: 0,
+  text: 'Text',
+  textCase: 'none',
+  underline: false,
+  x: 0.5,
+  y: 0.18,
 };
 
 export type ProjectPresent = {
@@ -110,6 +199,7 @@ export type ProjectAction =
   | { textId: string | null; type: 'SELECT_TEXT' }
   | { patch: Partial<TextOverlay>; record?: boolean; textId: string; type: 'UPDATE_TEXT' }
   | { textId: string; type: 'DELETE_TEXT' }
+  | { nextProject: ProjectPresent; type: 'APPLY_EAL' }
   | { type: 'UNDO' }
   | { type: 'REDO' };
 
@@ -118,6 +208,7 @@ const MAX_HISTORY = 60;
 const DEFAULT_VIDEO_TRACK_ID = 'video-1';
 
 export const DEFAULT_CLIP_TRANSFORM: ClipTransform = {
+  rotation: 0,
   scale: 1,
   x: 0.5,
   y: 0.5,
@@ -221,6 +312,7 @@ export function createTimelineClip(
 
 export function clampClipTransform(transform: Partial<ClipTransform> | undefined): ClipTransform {
   return {
+    rotation: Math.min(Math.max(transform?.rotation ?? DEFAULT_CLIP_TRANSFORM.rotation, -180), 180),
     scale: Math.min(Math.max(transform?.scale ?? DEFAULT_CLIP_TRANSFORM.scale, 0.25), 4),
     x: Math.min(Math.max(transform?.x ?? DEFAULT_CLIP_TRANSFORM.x, 0), 1),
     y: Math.min(Math.max(transform?.y ?? DEFAULT_CLIP_TRANSFORM.y, 0), 1),
@@ -348,27 +440,114 @@ export function getClipStart(project: ProjectPresent, clipId: string) {
   return project.clips.find((clip) => clip.id === clipId)?.timelineStart ?? null;
 }
 
-export function getClipsAtTime(project: ProjectPresent, time: number) {
+export type TimelineIndex = {
+  audibleTrackIds: Set<string>;
+  clipsByTrack: Map<string, TimelineClip[]>;
+  textOverlaysByTrack: Map<string, TextOverlay[]>;
+  trackById: Map<string, TimelineTrack>;
+  trackIndexById: Map<string, number>;
+  visibleTextTrackIds: Set<string>;
+};
+
+export function buildTimelineIndex(project: Pick<ProjectPresent, 'clips' | 'textOverlays' | 'tracks'>): TimelineIndex {
+  const trackIndexById = new Map<string, number>();
+  const trackById = new Map<string, TimelineTrack>();
+  const audibleTrackIds = new Set<string>();
+  const visibleTextTrackIds = new Set<string>();
+
+  for (const track of project.tracks) {
+    trackIndexById.set(track.id, track.index);
+    trackById.set(track.id, track);
+    if (track.kind === 'video' ? track.visible : !track.muted) {
+      audibleTrackIds.add(track.id);
+    }
+    if (track.kind === 'text' && track.visible) {
+      visibleTextTrackIds.add(track.id);
+    }
+  }
+
+  const clipsByTrack = new Map<string, TimelineClip[]>();
+  for (const clip of project.clips) {
+    let bucket = clipsByTrack.get(clip.trackId);
+    if (!bucket) {
+      bucket = [];
+      clipsByTrack.set(clip.trackId, bucket);
+    }
+    bucket.push(clip);
+  }
+  for (const bucket of clipsByTrack.values()) {
+    bucket.sort((a, b) => a.timelineStart - b.timelineStart);
+  }
+
+  const textOverlaysByTrack = new Map<string, TextOverlay[]>();
+  for (const overlay of project.textOverlays) {
+    let bucket = textOverlaysByTrack.get(overlay.trackId);
+    if (!bucket) {
+      bucket = [];
+      textOverlaysByTrack.set(overlay.trackId, bucket);
+    }
+    bucket.push(overlay);
+  }
+  for (const bucket of textOverlaysByTrack.values()) {
+    bucket.sort((a, b) => a.start - b.start);
+  }
+
+  return { audibleTrackIds, clipsByTrack, textOverlaysByTrack, trackById, trackIndexById, visibleTextTrackIds };
+}
+
+// Binary search for the clip whose [start, end) contains `time`. The list
+// must already be sorted by `timelineStart`. Clips on the same track cannot
+// overlap (normalizeTimelineClips enforces this) so at most one match.
+function binarySearchClipAt(list: TimelineClip[], time: number): TimelineClip | null {
+  let lo = 0;
+  let hi = list.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    const clip = list[mid];
+    if (time < clip.timelineStart) {
+      hi = mid - 1;
+    } else if (time >= clip.timelineStart + getClipDuration(clip)) {
+      lo = mid + 1;
+    } else {
+      return clip;
+    }
+  }
+  return null;
+}
+
+export function getClipsAtTimeFromIndex(index: TimelineIndex, tracks: TimelineTrack[], time: number) {
   const clampedTime = Math.max(time, 0);
-  const trackIndexById = new Map(project.tracks.map((track) => [track.id, track.index]));
-  const audibleTrackIds = new Set(
-    project.tracks.filter((track) => track.kind === 'video' ? track.visible : !track.muted).map((track) => track.id),
-  );
+  const result: Array<{
+    clip: TimelineClip;
+    clipEnd: number;
+    clipStart: number;
+    localTime: number;
+    track: TimelineTrack | null;
+  }> = [];
 
-  return project.clips
-    .filter((clip) => audibleTrackIds.has(clip.trackId) && clampedTime >= clip.timelineStart && clampedTime < getClipEnd(clip))
-    .sort((a, b) => (trackIndexById.get(a.trackId) ?? 0) - (trackIndexById.get(b.trackId) ?? 0))
-    .map((clip) => {
-      const duration = getClipDuration(clip);
-
-      return {
-        clip,
-        clipEnd: clip.timelineStart + duration,
-        clipStart: clip.timelineStart,
-        localTime: Math.min(duration, Math.max(0, clampedTime - clip.timelineStart)),
-        track: getTrackById(project, clip.trackId),
-      };
+  // Iterating in `tracks` order then sorting by trackIndex preserves the
+  // existing ordering contract (lower trackIndex first in result).
+  for (const track of tracks) {
+    if (!index.audibleTrackIds.has(track.id)) continue;
+    const bucket = index.clipsByTrack.get(track.id);
+    if (!bucket || bucket.length === 0) continue;
+    const clip = binarySearchClipAt(bucket, clampedTime);
+    if (!clip) continue;
+    const duration = getClipDuration(clip);
+    result.push({
+      clip,
+      clipEnd: clip.timelineStart + duration,
+      clipStart: clip.timelineStart,
+      localTime: Math.min(duration, Math.max(0, clampedTime - clip.timelineStart)),
+      track,
     });
+  }
+  result.sort((a, b) => (index.trackIndexById.get(a.track?.id ?? '') ?? 0) - (index.trackIndexById.get(b.track?.id ?? '') ?? 0));
+  return result;
+}
+
+export function getClipsAtTime(project: ProjectPresent, time: number) {
+  return getClipsAtTimeFromIndex(buildTimelineIndex(project), project.tracks, time);
 }
 
 export function getVideoClipsAtTime(project: ProjectPresent, time: number) {
@@ -377,6 +556,36 @@ export function getVideoClipsAtTime(project: ProjectPresent, time: number) {
 
 export function getAudioClipsAtTime(project: ProjectPresent, time: number) {
   return getClipsAtTime(project, time).filter((entry) => entry.track?.kind === 'audio');
+}
+
+export function getVideoClipsAtTimeFromIndex(index: TimelineIndex, tracks: TimelineTrack[], time: number) {
+  return getClipsAtTimeFromIndex(index, tracks, time).filter((entry) => entry.track?.kind === 'video');
+}
+
+export function getAudioClipsAtTimeFromIndex(index: TimelineIndex, tracks: TimelineTrack[], time: number) {
+  return getClipsAtTimeFromIndex(index, tracks, time).filter((entry) => entry.track?.kind === 'audio');
+}
+
+export function getActiveTextOverlaysFromIndex(index: TimelineIndex, textOverlays: TextOverlay[], playhead: number): TextOverlay[] {
+  if (textOverlays.length === 0) return [];
+  // Text overlays can overlap and aren't guaranteed disjoint; binary search
+  // only gives O(log n) when there's no overlap. With small N (text overlay
+  // count is typically <100), linear scan over the per-track bucket is fine.
+  const result: TextOverlay[] = [];
+  for (const trackId of index.visibleTextTrackIds) {
+    const bucket = index.textOverlaysByTrack.get(trackId);
+    if (!bucket) continue;
+    for (const overlay of bucket) {
+      if (overlay.start > playhead) break;
+      if (playhead <= overlay.end) result.push(overlay);
+    }
+  }
+  // Legacy overlays without a trackId still need to render until explicitly hidden.
+  for (const overlay of textOverlays) {
+    if (overlay.trackId) continue;
+    if (playhead >= overlay.start && playhead <= overlay.end) result.push(overlay);
+  }
+  return result;
 }
 
 export function getClipAtTime(project: ProjectPresent, time: number) {
@@ -425,19 +634,67 @@ function clampSourceTime(asset: ProjectAsset | null, value: number) {
   return Math.min(Math.max(value, 0), Math.max(asset?.duration ?? value, MIN_CLIP_DURATION));
 }
 
-function clampTextOverlay(overlay: TextOverlay, projectDuration: number, fallbackTrackId = DEFAULT_TEXT_TRACK_ID): TextOverlay {
+const SUPPORTED_FONT_FAMILY_IDS = new Set<TextFontFamilyId>(TEXT_FONT_FAMILIES.map((font) => font.id));
+
+function normalizeFontFamily(value: unknown): TextFontFamilyId {
+  return typeof value === 'string' && SUPPORTED_FONT_FAMILY_IDS.has(value as TextFontFamilyId)
+    ? (value as TextFontFamilyId)
+    : DEFAULT_TEXT_OVERLAY.fontFamily;
+}
+
+function normalizeTextCase(value: unknown): TextCase {
+  return value === 'upper' || value === 'lower' ? value : 'none';
+}
+
+function normalizeColor(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {
+    return fallback;
+  }
+  const trimmed = value.trim();
+  if (/^#[0-9a-fA-F]{3}$/.test(trimmed) || /^#[0-9a-fA-F]{6}$/.test(trimmed) || /^#[0-9a-fA-F]{8}$/.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  return fallback;
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  return Math.min(Math.max(numeric, min), max);
+}
+
+export function clampTextOverlay(overlay: TextOverlay, projectDuration: number, fallbackTrackId = DEFAULT_TEXT_TRACK_ID): TextOverlay {
   const start = Math.min(Math.max(overlay.start, 0), Math.max(0, projectDuration - MIN_CLIP_DURATION));
   const end = Math.min(Math.max(overlay.end, start + MIN_CLIP_DURATION), Math.max(projectDuration, start + MIN_CLIP_DURATION));
 
   return {
+    ...DEFAULT_TEXT_OVERLAY,
     ...overlay,
+    backgroundColor: normalizeColor(overlay.backgroundColor, DEFAULT_TEXT_OVERLAY.backgroundColor),
+    bold: Boolean(overlay.bold ?? DEFAULT_TEXT_OVERLAY.bold),
+    color: normalizeColor(overlay.color, DEFAULT_TEXT_OVERLAY.color),
     end,
-    size: Math.min(Math.max(overlay.size, 12), 96),
+    fontFamily: normalizeFontFamily(overlay.fontFamily),
+    italic: Boolean(overlay.italic ?? DEFAULT_TEXT_OVERLAY.italic),
+    letterSpacing: clampNumber(overlay.letterSpacing, -8, 32, DEFAULT_TEXT_OVERLAY.letterSpacing),
+    lineHeight: clampNumber(overlay.lineHeight, 0.8, 3, DEFAULT_TEXT_OVERLAY.lineHeight),
+    opacity: clampNumber(overlay.opacity, 0, 1, DEFAULT_TEXT_OVERLAY.opacity),
+    rotation: clampNumber(overlay.rotation, -180, 180, DEFAULT_TEXT_OVERLAY.rotation),
+    shadowBlur: clampNumber(overlay.shadowBlur, 0, 32, DEFAULT_TEXT_OVERLAY.shadowBlur),
+    shadowColor: normalizeColor(overlay.shadowColor, DEFAULT_TEXT_OVERLAY.shadowColor),
+    shadowOffsetX: clampNumber(overlay.shadowOffsetX, -32, 32, DEFAULT_TEXT_OVERLAY.shadowOffsetX),
+    shadowOffsetY: clampNumber(overlay.shadowOffsetY, -32, 32, DEFAULT_TEXT_OVERLAY.shadowOffsetY),
+    size: clampNumber(overlay.size, 8, 240, DEFAULT_TEXT_OVERLAY.size),
+    skewX: clampNumber(overlay.skewX, -45, 45, DEFAULT_TEXT_OVERLAY.skewX),
+    skewY: clampNumber(overlay.skewY, -45, 45, DEFAULT_TEXT_OVERLAY.skewY),
     start,
-    text: overlay.text.slice(0, 180),
+    strokeColor: normalizeColor(overlay.strokeColor, DEFAULT_TEXT_OVERLAY.strokeColor),
+    strokeWidth: clampNumber(overlay.strokeWidth, 0, 16, DEFAULT_TEXT_OVERLAY.strokeWidth),
+    text: typeof overlay.text === 'string' ? overlay.text.slice(0, 700) : DEFAULT_TEXT_OVERLAY.text,
+    textCase: normalizeTextCase(overlay.textCase),
     trackId: overlay.trackId || fallbackTrackId,
-    x: Math.min(Math.max(overlay.x, 0.02), 0.98),
-    y: Math.min(Math.max(overlay.y, 0.02), 0.98),
+    underline: Boolean(overlay.underline ?? DEFAULT_TEXT_OVERLAY.underline),
+    x: clampNumber(overlay.x, 0.02, 0.98, DEFAULT_TEXT_OVERLAY.x),
+    y: clampNumber(overlay.y, 0.02, 0.98, DEFAULT_TEXT_OVERLAY.y),
   };
 }
 
@@ -458,6 +715,9 @@ export type SnapTargetOptions = {
   excludeClipId?: string | null;
   excludeTextId?: string | null;
   includePlayhead?: number | null;
+  /** Extra timeline-time positions to include — used to inject beat-grid
+   *  targets so drag/trim snaps to musical beats just like to clip edges. */
+  extraTargets?: readonly number[];
 };
 
 export function collectSnapTargets(
@@ -481,6 +741,14 @@ export function collectSnapTargets(
     }
     targets.add(round(overlay.start));
     targets.add(round(overlay.end));
+  }
+
+  if (options.extraTargets) {
+    for (const value of options.extraTargets) {
+      if (Number.isFinite(value) && value >= 0) {
+        targets.add(round(value));
+      }
+    }
   }
 
   if (typeof options.includePlayhead === 'number' && Number.isFinite(options.includePlayhead)) {
@@ -535,6 +803,30 @@ export function findFreeTimelineStart(
     if (start + minDuration > clipStart + 0.001 && start + 0.001 < clipEnd) {
       // Would overlap this clip. Snap to immediately after it.
       start = clipEnd;
+    }
+  }
+
+  return start;
+}
+
+export function findFreeTextOverlayStart(
+  textOverlays: TextOverlay[],
+  trackId: string,
+  desiredStart: number,
+  duration: number,
+  excludeTextId: string | null = null,
+): number {
+  const sorted = textOverlays
+    .filter((overlay) => overlay.trackId === trackId && overlay.id !== excludeTextId)
+    .sort((a, b) => a.start - b.start);
+
+  let start = Math.max(0, desiredStart);
+  const minDuration = Math.max(duration, MIN_CLIP_DURATION);
+
+  for (const overlay of sorted) {
+    if (start + minDuration > overlay.start + 0.001 && start + 0.001 < overlay.end) {
+      // Would overlap this overlay. Snap to immediately after it.
+      start = overlay.end;
     }
   }
 
@@ -1041,7 +1333,19 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
         }
       }
 
-      const overlay = clampTextOverlay({ ...action.overlay, trackId }, projectDuration, trackId);
+      const candidate = clampTextOverlay({ ...action.overlay, trackId }, projectDuration, trackId);
+      const candidateDuration = Math.max(MIN_CLIP_DURATION, candidate.end - candidate.start);
+      const freeStart = findFreeTextOverlayStart(
+        project.textOverlays,
+        candidate.trackId,
+        candidate.start,
+        candidateDuration,
+        candidate.id,
+      );
+      const overlay =
+        freeStart !== candidate.start
+          ? clampTextOverlay({ ...candidate, end: freeStart + candidateDuration, start: freeStart }, projectDuration, trackId)
+          : candidate;
 
       return {
         ...project,
@@ -1062,12 +1366,51 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
 
     case 'UPDATE_TEXT': {
       const projectDuration = Math.max(getProjectDuration(project), MIN_CLIP_DURATION);
+      const target = project.textOverlays.find((overlay) => overlay.id === action.textId);
+
+      if (!target) {
+        return project;
+      }
+
+      const merged = clampTextOverlay({ ...target, ...action.patch }, projectDuration);
+      const touchedStart = action.patch.start !== undefined && action.patch.start !== target.start;
+      const touchedTrack = action.patch.trackId !== undefined && action.patch.trackId !== target.trackId;
+
+      // Overlap prevention parity with audio/video clips. Only move-like edits
+      // (start changed or trackId changed) shift to a free slot — pure trims
+      // (end-only changes) are clipped against the next neighbour instead so
+      // the user can shrink freely but can't extend through another overlay.
+      let next = merged;
+      if (touchedStart || touchedTrack) {
+        const duration = Math.max(MIN_CLIP_DURATION, merged.end - merged.start);
+        const freeStart = findFreeTextOverlayStart(
+          project.textOverlays,
+          merged.trackId,
+          merged.start,
+          duration,
+          action.textId,
+        );
+        if (freeStart !== merged.start) {
+          next = clampTextOverlay({ ...merged, end: freeStart + duration, start: freeStart }, projectDuration);
+        }
+      } else {
+        // Pure trim or in-place property edit. Clip end against the next
+        // overlay on this track to prevent expansion-overlap.
+        const neighbours = project.textOverlays
+          .filter((overlay) => overlay.trackId === merged.trackId && overlay.id !== action.textId && overlay.start >= merged.start)
+          .sort((a, b) => a.start - b.start);
+        const nextNeighbour = neighbours[0];
+        if (nextNeighbour && merged.end > nextNeighbour.start) {
+          next = clampTextOverlay(
+            { ...merged, end: Math.max(merged.start + MIN_CLIP_DURATION, nextNeighbour.start) },
+            projectDuration,
+          );
+        }
+      }
 
       return {
         ...project,
-        textOverlays: project.textOverlays.map((overlay) =>
-          overlay.id === action.textId ? clampTextOverlay({ ...overlay, ...action.patch }, projectDuration) : overlay,
-        ),
+        textOverlays: project.textOverlays.map((overlay) => (overlay.id === action.textId ? next : overlay)),
       };
     }
 
@@ -1077,6 +1420,11 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
         selectedTextId: project.selectedTextId === action.textId ? null : project.selectedTextId,
         textOverlays: project.textOverlays.filter((overlay) => overlay.id !== action.textId),
       };
+
+    case 'APPLY_EAL':
+      // Wholesale state replacement — used by the AI's apply_eal tool. The
+      // outer reducer wrapper handles history (push current present to past).
+      return action.nextProject;
 
     case 'UNDO':
     case 'REDO':

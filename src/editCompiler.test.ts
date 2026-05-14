@@ -5,7 +5,7 @@ import { createEditArrayFromRuntime } from './editArrayLanguage';
 import { createEditRepairPlan, applyEditRepairPlan } from './editRepairLoop';
 import { createVisualReviewReport } from './visualReviewAgent';
 import { PROJECT_PRESETS } from './projectPersistence';
-import { DEFAULT_CLIP_TRANSFORM, createDefaultTracks, idleJobStatus, type ProjectPresent } from './projectModel';
+import { DEFAULT_CLIP_TRANSFORM, DEFAULT_TEXT_OVERLAY, createDefaultTracks, idleJobStatus, type ProjectPresent } from './projectModel';
 
 function project(): ProjectPresent {
   const file = new File(['video'], 'main.mp4', { type: 'video/mp4' });
@@ -56,7 +56,7 @@ function project(): ProjectPresent {
     selectedTrackId: tracks[0].id,
     textOverlays: [
       {
-        align: 'center',
+        ...DEFAULT_TEXT_OVERLAY,
         end: 2,
         id: 'text-1',
         size: 42,
@@ -84,6 +84,22 @@ describe('Edit compiler and runtime', () => {
     expect(plan.operations.map((operation) => operation.type)).toContain('ADD_TEXT');
   });
 
+  it('round-trips ClipTransform.rotation through EAL', () => {
+    const sourceProject = project();
+    sourceProject.clips = sourceProject.clips.map((clip) => ({
+      ...clip,
+      transform: { rotation: 45, scale: 1.5, x: 0.4, y: 0.6 },
+    }));
+    const plan = compileEditArrayProgram(createEditArrayFromRuntime(sourceProject, PROJECT_PRESETS.vertical, 'Runtime'));
+    const result = executeEditPlan(plan, sourceProject);
+    expect(result.project.clips[0].transform).toMatchObject({
+      rotation: 45,
+      scale: 1.5,
+      x: 0.4,
+      y: 0.6,
+    });
+  });
+
   it('executes a compiled plan against available runtime media', () => {
     const sourceProject = project();
     const plan = compileEditArrayProgram(createEditArrayFromRuntime(sourceProject, PROJECT_PRESETS.vertical, 'Runtime'));
@@ -93,6 +109,68 @@ describe('Edit compiler and runtime', () => {
     expect(result.project.clips).toHaveLength(1);
     expect(result.project.textOverlays).toHaveLength(1);
     expect(result.diagnostics.filter((diagnostic) => diagnostic.severity === 'error')).toHaveLength(0);
+  });
+
+  it('round-trips the full text styling envelope through EAL', () => {
+    const sourceProject = project();
+    sourceProject.textOverlays = [
+      {
+        ...DEFAULT_TEXT_OVERLAY,
+        backgroundColor: '#11223380',
+        bold: false,
+        color: '#ff00cc',
+        end: 2,
+        fontFamily: 'bebas',
+        id: 'text-1',
+        italic: true,
+        letterSpacing: 4,
+        lineHeight: 1.4,
+        opacity: 0.75,
+        rotation: 12,
+        shadowBlur: 8,
+        shadowColor: '#000000cc',
+        shadowOffsetX: 2,
+        shadowOffsetY: 3,
+        size: 56,
+        skewX: -8,
+        skewY: 4,
+        start: 0.5,
+        strokeColor: '#ffffff',
+        strokeWidth: 2.5,
+        text: 'Styled',
+        textCase: 'upper',
+        trackId: 'text-1',
+        underline: true,
+        x: 0.5,
+        y: 0.5,
+      },
+    ];
+    const plan = compileEditArrayProgram(createEditArrayFromRuntime(sourceProject, PROJECT_PRESETS.vertical, 'Runtime'));
+    const result = executeEditPlan(plan, sourceProject);
+    const restored = result.project.textOverlays[0];
+
+    expect(restored).toMatchObject({
+      backgroundColor: '#11223380',
+      bold: false,
+      color: '#ff00cc',
+      fontFamily: 'bebas',
+      italic: true,
+      letterSpacing: 4,
+      lineHeight: 1.4,
+      opacity: 0.75,
+      rotation: 12,
+      shadowBlur: 8,
+      shadowColor: '#000000cc',
+      shadowOffsetX: 2,
+      shadowOffsetY: 3,
+      size: 56,
+      skewX: -8,
+      skewY: 4,
+      strokeColor: '#ffffff',
+      strokeWidth: 2.5,
+      textCase: 'upper',
+      underline: true,
+    });
   });
 
   it('creates deterministic visual review and repair patches', () => {

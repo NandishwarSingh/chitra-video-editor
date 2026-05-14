@@ -4,7 +4,7 @@ import { createEditArrayFromRuntime } from './editArrayLanguage';
 import { runEditRepairLoop } from './editRepairLoop';
 import { createVisualReviewReport } from './visualReviewAgent';
 import { PROJECT_PRESETS } from './projectPersistence';
-import { DEFAULT_CLIP_TRANSFORM, createDefaultTracks, idleJobStatus, type ProjectPresent } from './projectModel';
+import { DEFAULT_CLIP_TRANSFORM, DEFAULT_TEXT_OVERLAY, createDefaultTracks, idleJobStatus, type ProjectPresent } from './projectModel';
 
 function project(): ProjectPresent {
   const file = new File(['video'], 'main.mp4', { type: 'video/mp4' });
@@ -51,7 +51,7 @@ function project(): ProjectPresent {
     selectedTrackId: tracks[0].id,
     textOverlays: [
       {
-        align: 'center',
+        ...DEFAULT_TEXT_OVERLAY,
         end: 2,
         id: 'text-1',
         size: 42,

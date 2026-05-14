@@ -101,7 +101,7 @@ describe('transcode command builders', () => {
         sourceOut: 7,
         timelineStart: 10,
         trackId: 'video-1',
-        transform: { scale: 1.2, x: 0.45, y: 0.35 },
+        transform: { rotation: 0, scale: 1.2, x: 0.45, y: 0.35 },
         volume: 0.75,
       },
       clipTimelineStart: 10,

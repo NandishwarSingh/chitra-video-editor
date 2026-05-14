@@ -20,7 +20,10 @@ describe('media engine helpers', () => {
       type: 'video/mp4',
     });
 
-    expect(createMediaFingerprint(file, 10)).toBe('clip.mp4:3:123:10.000');
+    // Fingerprint intentionally omits `lastModified` so a project rehydrated
+    // from IndexedDB (which reconstructs File blobs with a fresh timestamp)
+    // still hits cached transcripts / thumbnails for the same media.
+    expect(createMediaFingerprint(file, 10)).toBe('clip.mp4:3:10.000');
   });
 
   it('recommends proxies for high-resolution or large files', () => {
