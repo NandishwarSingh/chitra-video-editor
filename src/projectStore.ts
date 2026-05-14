@@ -1,13 +1,15 @@
 const DB_NAME = 'chitra-project-store';
 import type { ProjectRecord } from './projectPersistence';
 
-const DB_VERSION = 3;
+const DB_VERSION = 5;
 const THUMBNAIL_STORE = 'thumbnail-cache';
 const PROXY_STORE = 'proxy-cache';
 const JOB_METADATA_STORE = 'job-metadata';
 const PROJECTS_STORE = 'projects';
 const PROJECT_MEDIA_STORE = 'project-media';
 const PROJECT_POSTERS_STORE = 'project-posters';
+const TRANSCRIPT_STORE = 'asset-transcripts';
+const BEAT_STORE = 'asset-beats';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -44,6 +46,14 @@ function openDb() {
 
       if (!db.objectStoreNames.contains(PROJECT_POSTERS_STORE)) {
         db.createObjectStore(PROJECT_POSTERS_STORE);
+      }
+
+      if (!db.objectStoreNames.contains(TRANSCRIPT_STORE)) {
+        db.createObjectStore(TRANSCRIPT_STORE);
+      }
+
+      if (!db.objectStoreNames.contains(BEAT_STORE)) {
+        db.createObjectStore(BEAT_STORE);
       }
     };
 
@@ -203,4 +213,80 @@ export async function deleteProjectBlobs(record: ProjectRecord) {
       .filter((asset) => asset.posterKey)
       .map((asset) => deleteProjectPosterBlob(asset.posterKey as string)),
   ]);
+}
+
+export type StoredTranscriptWord = {
+  end: number;
+  start: number;
+  word: string;
+};
+
+export type StoredTranscriptSegment = {
+  end: number;
+  start: number;
+  text: string;
+};
+
+export type StoredAssetTranscript = {
+  createdAt: number;
+  duration: number | null;
+  language: string | null;
+  model: string;
+  provider: string;
+  segments: StoredTranscriptSegment[];
+  text: string;
+  words: StoredTranscriptWord[];
+};
+
+// Transcripts are keyed by the asset's content fingerprint so re-importing
+// the same media file (across projects, browser reloads, even between IndexedDB
+// migrations) immediately picks up the cached transcript without a re-spend.
+export async function putAssetTranscript(fingerprint: string, transcript: StoredAssetTranscript) {
+  await runTransaction<IDBValidKey>(TRANSCRIPT_STORE, 'readwrite', (store) =>
+    store.put(transcript, fingerprint),
+  );
+}
+
+export async function getAssetTranscript(fingerprint: string): Promise<StoredAssetTranscript | null> {
+  try {
+    return (
+      (await runTransaction<StoredAssetTranscript | undefined>(TRANSCRIPT_STORE, 'readonly', (store) =>
+        store.get(fingerprint),
+      )) ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteAssetTranscript(fingerprint: string) {
+  await runTransaction<undefined>(TRANSCRIPT_STORE, 'readwrite', (store) => store.delete(fingerprint));
+}
+
+export type StoredBeatData = {
+  beats: number[];
+  bpm: number | null;
+  createdAt: number;
+  duration: number;
+  sampleRate: number;
+};
+
+export async function putAssetBeats(fingerprint: string, beats: StoredBeatData) {
+  await runTransaction<IDBValidKey>(BEAT_STORE, 'readwrite', (store) => store.put(beats, fingerprint));
+}
+
+export async function getAssetBeats(fingerprint: string): Promise<StoredBeatData | null> {
+  try {
+    return (
+      (await runTransaction<StoredBeatData | undefined>(BEAT_STORE, 'readonly', (store) =>
+        store.get(fingerprint),
+      )) ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteAssetBeats(fingerprint: string) {
+  await runTransaction<undefined>(BEAT_STORE, 'readwrite', (store) => store.delete(fingerprint));
 }
