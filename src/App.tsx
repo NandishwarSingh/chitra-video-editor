@@ -5470,6 +5470,7 @@ function Inspector({
             label="Position"
             max={getProjectDuration(project) + 60}
             min={0}
+            sliderWindow={Math.max(15, clipDuration * 1.5)}
             step={0.05}
             suffix="s"
             value={selectedClip.timelineStart}
@@ -5776,12 +5777,16 @@ type ScrubNumberProps = {
   max: number;
   min: number;
   onChange: (value: number) => void;
+  /** When set, the slider's visual range is value ± sliderWindow (clamped to
+   *  [min, max]); the number field still accepts any value in [min, max].
+   *  Use for sliders on very large ranges where sub-pixel precision is impossible. */
+  sliderWindow?: number;
   step: number;
   suffix?: string;
   value: number;
 };
 
-function ScrubNumber({ compact, label, max, min, onChange, step, suffix, value }: ScrubNumberProps) {
+function ScrubNumber({ compact, label, max, min, onChange, sliderWindow, step, suffix, value }: ScrubNumberProps) {
   const safeValue = Number.isFinite(value) ? value : 0;
   const decimals = stepDecimals(step);
   const formatted = safeValue.toFixed(decimals);
@@ -5793,10 +5798,15 @@ function ScrubNumber({ compact, label, max, min, onChange, step, suffix, value }
     if (!editing) setText(formatted);
   }, [editing, formatted]);
 
-  const span = Math.max(0.0001, max - min);
-  const thumbPct = Math.min(100, Math.max(0, ((safeValue - min) / span) * 100));
-  const bipolar = min < 0 && max > 0;
-  const zeroPct = bipolar ? Math.min(100, Math.max(0, ((0 - min) / span) * 100)) : 0;
+  // The slider's visible range — defaults to [min, max], or a window around
+  // the current value when sliderWindow is set.
+  const sliderMin = sliderWindow !== undefined ? Math.max(min, safeValue - sliderWindow) : min;
+  const sliderMax = sliderWindow !== undefined ? Math.min(max, safeValue + sliderWindow) : max;
+
+  const span = Math.max(0.0001, sliderMax - sliderMin);
+  const thumbPct = Math.min(100, Math.max(0, ((safeValue - sliderMin) / span) * 100));
+  const bipolar = sliderMin < 0 && sliderMax > 0;
+  const zeroPct = bipolar ? Math.min(100, Math.max(0, ((0 - sliderMin) / span) * 100)) : 0;
   // Notch sits at value-0 position when the range crosses zero, otherwise it
   // anchors at the visual midpoint as a sense-of-scale reference.
   const notchPct = bipolar ? zeroPct : 50;
@@ -5828,8 +5838,8 @@ function ScrubNumber({ compact, label, max, min, onChange, step, suffix, value }
           <div className="scrub-track-notch" style={{ left: `${notchPct}%` }} />
           <input
             className="scrub-slider"
-            max={max}
-            min={min}
+            max={sliderMax}
+            min={sliderMin}
             onChange={(event) => onChange(Number(event.target.value))}
             step={step}
             type="range"
