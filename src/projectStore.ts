@@ -1,7 +1,7 @@
 const DB_NAME = 'chitra-project-store';
 import type { ProjectRecord } from './projectPersistence';
 
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 const THUMBNAIL_STORE = 'thumbnail-cache';
 const PROXY_STORE = 'proxy-cache';
 const JOB_METADATA_STORE = 'job-metadata';
@@ -266,10 +266,35 @@ export async function deleteAssetTranscript(fingerprint: string) {
 export type StoredBeatData = {
   beats: number[];
   bpm: number | null;
+  /** Per-beat confidence (0..1); single number for the whole detection run. */
+  confidence: number;
   createdAt: number;
+  /** Subset of `beats` that are downbeats (bar starts). Populated by madmom
+   *  natively; aubio uses a 4/4 heuristic. */
+  downbeats: number[];
   duration: number;
+  /** Provider that produced this record — useful for telemetry / debugging. */
+  provider: string;
   sampleRate: number;
 };
+
+// Tolerant reader: older cached entries (DB v5) don't have `downbeats` /
+// `confidence` / `provider`. Default them so the rest of the app can assume
+// they're always present without per-call defaulting.
+export async function getAssetBeatsTolerant(fingerprint: string): Promise<StoredBeatData | null> {
+  const raw = await getAssetBeats(fingerprint);
+  if (!raw) return null;
+  return {
+    beats: raw.beats ?? [],
+    bpm: raw.bpm ?? null,
+    confidence: raw.confidence ?? 1,
+    createdAt: raw.createdAt ?? Date.now(),
+    downbeats: raw.downbeats ?? [],
+    duration: raw.duration ?? 0,
+    provider: raw.provider ?? 'unknown',
+    sampleRate: raw.sampleRate ?? 16_000,
+  };
+}
 
 export async function putAssetBeats(fingerprint: string, beats: StoredBeatData) {
   await runTransaction<IDBValidKey>(BEAT_STORE, 'readwrite', (store) => store.put(beats, fingerprint));

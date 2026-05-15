@@ -36,7 +36,9 @@ export type EditorContextSnapshot = {
     assetId: string;
     bpm: number | null;
     clipId: string;
+    clipKind: 'audio' | 'video' | 'text' | 'unknown';
     timelineBeats: number[];
+    timelineDownbeats: number[];
   }>;
   editArray: unknown;
   playheadSeconds: number;
@@ -102,7 +104,9 @@ async function streamChat(
               asset_id: b.assetId,
               bpm: b.bpm,
               clip_id: b.clipId,
+              clip_kind: b.clipKind,
               timeline_beats: b.timelineBeats,
+              timeline_downbeats: b.timelineDownbeats,
             })),
             edit_array: context.editArray,
             playhead_seconds: context.playheadSeconds,

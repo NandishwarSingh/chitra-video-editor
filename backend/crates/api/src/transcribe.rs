@@ -198,22 +198,32 @@ impl TranscribeClient {
             return Err(TranscribeError::Local(format!("ffmpeg failed: {}", stderr.trim())));
         }
 
-        // 3. Run whisper-cli. `-oj` emits a sidecar JSON we can parse;
-        //    `-nt` suppresses the printed timestamps from stdout to keep
-        //    logs clean. Threads come from config; bumping helps a lot on
-        //    multi-core machines.
+        // 3. Get the *real* media duration from ffprobe up-front. Whisper
+        //    processes audio in 30 s windows and its segment timestamps
+        //    inherit those bounds — relying on whisper for duration produced
+        //    bogus values like "duration: 30.0" on a 15.13 s clip in QA.
+        let real_duration = probe_duration_seconds(&self.cfg.ffmpeg_path, &input_path).await.ok();
+
+        // 4. Run whisper-cli with phrase-level segmentation. `--split-on-word`
+        //    + `-ml 60` produce ~5–10 word segments instead of one big blob
+        //    of the whole take. `-ojf` emits per-token timestamps in the
+        //    JSON sidecar; we use those below to reconstruct word-level
+        //    timing for the AI's phrase-aware editing.
         let mut cmd = Command::new(&self.cfg.whisper_bin);
         cmd.args([
             "-m",
             &self.cfg.whisper_model,
             "-f",
             wav_path.to_str().ok_or_else(|| TranscribeError::Local("non-utf8 wav path".into()))?,
-            "-oj",
+            "-ojf",
             "-of",
             out_prefix.to_str().ok_or_else(|| TranscribeError::Local("non-utf8 out prefix".into()))?,
             "-nt",
             "-t",
             &self.cfg.whisper_threads.to_string(),
+            "--split-on-word",
+            "-ml",
+            "60",
         ]);
         if let Some(lang) = language_hint {
             cmd.args(["-l", lang]);
@@ -243,32 +253,88 @@ impl TranscribeClient {
         })?;
         let parsed: WhisperCppOutput = serde_json::from_str(&raw)?;
 
-        let segments: Vec<TranscriptSegment> = parsed
-            .transcription
-            .into_iter()
-            .map(|seg| TranscriptSegment {
-                text: seg.text.trim().to_string(),
+        // Reconstruct word-level timings from per-token data (whisper.cpp
+        // tokens are sub-word pieces; a token's text begins with a leading
+        // space when it starts a new word).
+        let mut words: Vec<TranscriptWord> = Vec::new();
+        let mut segments: Vec<TranscriptSegment> = Vec::new();
+        for seg in parsed.transcription.into_iter() {
+            let seg_text = seg.text.trim().to_string();
+            if seg_text.is_empty() {
+                continue;
+            }
+            segments.push(TranscriptSegment {
+                text: seg_text,
                 start: seg.offsets.from as f64 / 1000.0,
                 end: seg.offsets.to as f64 / 1000.0,
-            })
-            .filter(|s| !s.text.is_empty())
-            .collect();
+            });
+            let Some(tokens) = seg.tokens else { continue };
+            let mut current: Option<TranscriptWord> = None;
+            for tok in tokens {
+                // Skip special tokens (BOS, EOS, language tags, timestamps).
+                if tok.text.is_empty() || tok.text.starts_with('[') || tok.text.starts_with('<') {
+                    continue;
+                }
+                let starts_word = tok.text.starts_with(' ') || current.is_none();
+                let start_s = tok.offsets.from as f64 / 1000.0;
+                let end_s = tok.offsets.to as f64 / 1000.0;
+                if starts_word {
+                    if let Some(prev) = current.take() {
+                        if !prev.word.trim().is_empty() {
+                            words.push(prev);
+                        }
+                    }
+                    current = Some(TranscriptWord {
+                        word: tok.text.trim_start().to_string(),
+                        start: start_s,
+                        end: end_s,
+                    });
+                } else if let Some(w) = current.as_mut() {
+                    w.word.push_str(&tok.text);
+                    w.end = end_s;
+                }
+            }
+            if let Some(w) = current {
+                if !w.word.trim().is_empty() {
+                    words.push(w);
+                }
+            }
+        }
+
+        // Clamp segment/word end times to the real media duration so a
+        // 15 s clip never reports a 30 s last segment.
+        if let Some(d) = real_duration {
+            for s in segments.iter_mut() {
+                if s.end > d {
+                    s.end = d;
+                }
+                if s.start > d {
+                    s.start = d;
+                }
+            }
+            for w in words.iter_mut() {
+                if w.end > d {
+                    w.end = d;
+                }
+                if w.start > d {
+                    w.start = d;
+                }
+            }
+        }
 
         let text = segments
             .iter()
             .map(|s| s.text.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        let duration = segments.last().map(|s| s.end);
+        let duration = real_duration.or_else(|| segments.last().map(|s| s.end));
         let language = parsed.result.and_then(|r| r.language);
 
         Ok(TranscriptResult {
             text,
             language,
             duration,
-            words: Vec::new(), // segment-level only for now; word-level is a
-                               // future flag (--max-len 1 --split-on-word) once
-                               // we want to spend the extra CPU.
+            words,
             segments,
             provider: self.cfg.provider.clone(),
             model: model_basename(&self.cfg.whisper_model),
@@ -382,6 +448,9 @@ struct WhisperCppResult {
 struct WhisperCppSegment {
     text: String,
     offsets: WhisperCppOffsets,
+    /// Present only with `-ojf` (json full).
+    #[serde(default)]
+    tokens: Option<Vec<WhisperCppToken>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -389,6 +458,59 @@ struct WhisperCppOffsets {
     /// Milliseconds from the start of the audio.
     from: u64,
     to: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WhisperCppToken {
+    #[serde(default)]
+    text: String,
+    offsets: WhisperCppOffsets,
+}
+
+/// Ask ffprobe for the real container duration. `CHITRA_FFMPEG_PATH` points
+/// at the ffmpeg binary; ffprobe ships alongside it in every supported install
+/// (Homebrew, Debian package, the static builds). We derive the ffprobe path
+/// by swapping `ffmpeg` → `ffprobe` in the configured ffmpeg path; if that
+/// fails, fall back to whatever `ffprobe` resolves to on PATH.
+async fn probe_duration_seconds(
+    ffmpeg_path: &str,
+    input_path: &std::path::Path,
+) -> Result<f64, TranscribeError> {
+    let derived = if ffmpeg_path.ends_with("ffmpeg") {
+        ffmpeg_path.replacen("ffmpeg", "ffprobe", 1)
+    } else {
+        "ffprobe".to_string()
+    };
+    let input_str = input_path
+        .to_str()
+        .ok_or_else(|| TranscribeError::Local("non-utf8 input path".into()))?;
+    for candidate in [derived.as_str(), "ffprobe"] {
+        let res = Command::new(candidate)
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                input_str,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await;
+        let Ok(out) = res else { continue };
+        if !out.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if let Ok(v) = stdout.trim().parse::<f64>() {
+            if v.is_finite() && v > 0.0 {
+                return Ok(v);
+            }
+        }
+    }
+    Err(TranscribeError::Local("ffprobe could not read duration".into()))
 }
 
 // ---------- Groq JSON shape ----------

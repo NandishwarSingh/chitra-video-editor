@@ -913,7 +913,7 @@ select:disabled {
 .asset-list,
 .control-stack {
   display: grid;
-  gap: 6px;
+  gap: 12px;
 }
 
 .asset-row {
@@ -996,6 +996,245 @@ select:disabled {
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* ---------- Asset grid (replaces the old asset-list rows) ---------- */
+
+.asset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.asset-card {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+
+.asset-card.is-selected {
+  border-color: var(--accent-blue);
+}
+
+.asset-card[draggable='true'] {
+  cursor: grab;
+}
+
+.asset-card[draggable='true']:active {
+  cursor: grabbing;
+}
+
+.asset-card-thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  /* Use the modern aspect-ratio property AND a padding-top fallback so the
+     box still resolves to ~16:9 on engines where aspect-ratio on a <button>
+     element is buggy. Whichever resolves first wins. */
+  aspect-ratio: 16 / 9;
+  min-height: 76px;
+  border: 0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--surface-2);
+  cursor: pointer;
+  padding: 0;
+  isolation: isolate;
+}
+
+.asset-card-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.asset-card-fallback {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-content: center;
+  color: var(--text-2);
+}
+
+.asset-card-fallback-audio {
+  background: linear-gradient(135deg, #11203f 0%, #1c3162 100%);
+  color: #86d6ff;
+}
+
+.asset-card-fallback-video {
+  background: linear-gradient(135deg, #1c1a16 0%, #38301a 100%);
+  color: #f5cb47;
+}
+
+/* Pill labels — kind + duration — sit on top of the thumb at all times. */
+.asset-card-kind,
+.asset-card-duration {
+  position: absolute;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, #000000 70%, transparent);
+  color: #ffffff;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+.asset-card-kind {
+  top: 4px;
+  left: 4px;
+  padding: 3px;
+  color: #cfd5e0;
+}
+
+.asset-card-duration {
+  bottom: 4px;
+  right: 4px;
+}
+
+/* File name + size overlay — hidden by default, fades in on hover. */
+.asset-card-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  align-content: end;
+  gap: 2px;
+  padding: 18px 8px 8px;
+  background: linear-gradient(180deg, transparent 30%, rgba(0, 0, 0, 0.8) 100%);
+  color: #ffffff;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+  text-align: left;
+}
+
+.asset-card-thumb:hover .asset-card-overlay,
+.asset-card-thumb:focus-visible .asset-card-overlay {
+  opacity: 1;
+}
+
+.asset-card-overlay strong {
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asset-card-overlay em {
+  font-size: 10px;
+  font-style: normal;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.asset-card-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  pointer-events: none;
+}
+
+.asset-card:hover .asset-card-actions,
+.asset-card.is-selected .asset-card-actions,
+.asset-card:focus-within .asset-card-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* ---------- Subtitle template preview picker ---------- */
+
+.template-picker {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.template-card {
+  display: grid;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.template-card:hover {
+  border-color: rgba(93, 158, 255, 0.55);
+  background: color-mix(in srgb, var(--accent-blue) 6%, var(--surface-2));
+}
+
+.template-card.is-selected {
+  border-color: var(--accent-blue);
+  background: color-mix(in srgb, var(--accent-blue) 12%, var(--surface-2));
+}
+
+.template-card-frame {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 100%;
+  height: 78px;
+  border-radius: 4px;
+  overflow: hidden;
+  background:
+    radial-gradient(80% 60% at 30% 40%, #34465c 0%, #1b2230 60%, #0d121a 100%);
+  isolation: isolate;
+}
+
+/* Faux "video" content — soft horizontal bars so the caption has a busy
+   background to read against, like real footage would. */
+.template-card-bars {
+  position: absolute;
+  inset: 0;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.04) 0 6px,
+      transparent 6px 18px
+    );
+  pointer-events: none;
+}
+
+.template-card-caption {
+  position: relative;
+  z-index: 1;
+  margin-bottom: 8px;
+  max-width: 88%;
+  text-align: center;
+  letter-spacing: 0.005em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.template-card-label {
+  padding: 0 2px 2px;
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  text-align: center;
+}
+
+.template-card.is-selected .template-card-label {
+  color: var(--text-1);
 }
 
 .import-drop,
@@ -1396,6 +1635,288 @@ input[type="range"]:focus {
   text-transform: uppercase;
 }
 
+.clip-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
+  box-shadow: var(--shadow-inset);
+}
+
+.clip-summary > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.clip-summary span {
+  font-size: 10.5px;
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.clip-summary strong {
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  margin-bottom: 2px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.section-head-row {
+  justify-content: space-between;
+}
+
+.toggle-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.toggle-inline input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+}
+
+.scrub {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  min-height: 30px;
+}
+
+.scrub.is-compact {
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.scrub-label {
+  font-size: 11.5px;
+  color: var(--text-2);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+.scrub-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.scrub-track-wrap {
+  position: relative;
+  height: 24px;
+  display: flex;
+  align-items: center;
+}
+
+.scrub-track-base {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.28);
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.5),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.03);
+  pointer-events: none;
+}
+
+.scrub-track-fill {
+  position: absolute;
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--accent-blue), color-mix(in srgb, var(--accent-blue) 78%, #000));
+  pointer-events: none;
+  transition: left 80ms ease-out, width 80ms ease-out;
+}
+
+.scrub-track-notch {
+  position: absolute;
+  width: 2px;
+  height: 14px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.55);
+  transform: translateX(-1px);
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+.scrub.is-bipolar .scrub-track-notch {
+  background: rgba(255, 255, 255, 0.75);
+}
+
+.scrub-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.scrub-slider:focus {
+  outline: none;
+  border: none;
+}
+
+.scrub-slider::-webkit-slider-runnable-track {
+  height: 24px;
+  background: transparent;
+  border: none;
+}
+
+.scrub-slider::-moz-range-track {
+  height: 24px;
+  background: transparent;
+  border: none;
+}
+
+.scrub-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 4px;
+  height: 22px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #ffffff 0%, #e1e7f0 100%);
+  border: none;
+  margin-top: 0;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.45),
+    0 2px 5px rgba(0, 0, 0, 0.55);
+  cursor: grab;
+  transition: transform 100ms ease, box-shadow 100ms ease;
+}
+
+.scrub-slider:hover::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 0 0 3px rgba(110, 175, 255, 0.22),
+    0 2px 6px rgba(0, 0, 0, 0.6);
+}
+
+.scrub-slider:focus::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.5),
+    0 0 0 3px rgba(110, 175, 255, 0.32),
+    0 2px 6px rgba(0, 0, 0, 0.6);
+}
+
+.scrub-slider:active::-webkit-slider-thumb {
+  cursor: grabbing;
+  transform: scaleY(1.08);
+}
+
+.scrub-slider::-moz-range-thumb {
+  width: 4px;
+  height: 22px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #ffffff 0%, #e1e7f0 100%);
+  border: 1px solid rgba(0, 0, 0, 0.45);
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.55);
+  cursor: grab;
+}
+
+.scrub-number-display,
+.scrub-number-input {
+  min-width: 56px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-1);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  cursor: text;
+  transition: border-color 100ms ease, background 100ms ease;
+}
+
+.scrub-number-display {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 2px;
+  font-weight: 500;
+}
+
+.scrub-number-display:hover {
+  background: var(--surface-2);
+  border-color: var(--line);
+}
+
+.scrub-number-input {
+  background: var(--surface-1);
+  border-color: var(--accent-blue);
+  box-shadow: none;
+}
+
+.scrub-number-input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.scrub-suffix {
+  font-size: 10.5px;
+  color: var(--text-3);
+  margin-left: 1px;
+}
+
+.scrub-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.section {
+  gap: 10px;
+}
+
 .button-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1406,25 +1927,46 @@ input[type="range"]:focus {
   margin-bottom: 6px;
 }
 
+/* Explicit block + min-height keeps the preview visible even when the
+   surrounding control-stack tries to collapse it; height + overflow-y caps
+   the long-take case at a reasonable scrollable box (~9 lines). */
 .transcript-preview {
-  margin: 0 0 8px;
-  padding: 8px 10px;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0 0 12px;
+  padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--surface-2);
-  color: var(--text-2);
+  color: var(--text-1);
   font-family: inherit;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.55;
-  max-height: 160px;
+  min-height: 96px;
+  max-height: 200px;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
+  /* Soft visual cue that there's more text below when the box scrolls. */
+  background-image: linear-gradient(to bottom, transparent 90%, color-mix(in srgb, var(--surface-2) 80%, transparent));
+  background-attachment: local;
+}
+
+.transcript-preview::-webkit-scrollbar {
+  width: 6px;
+}
+
+.transcript-preview::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 3px;
 }
 
 .transcript-empty {
-  margin: 0 0 8px;
-  padding: 8px 10px;
+  display: block;
+  box-sizing: border-box;
+  margin: 0 0 12px;
+  padding: 10px 12px;
   border: 1px dashed var(--line);
   border-radius: 6px;
   color: var(--text-3);
@@ -1475,6 +2017,28 @@ input[type="range"]:focus {
   min-height: 56px;
   resize: vertical;
   font-family: inherit;
+}
+
+.bulk-edit-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px dashed var(--line);
+  background: var(--surface-2);
+}
+
+.bulk-edit-row.is-active {
+  border-style: solid;
+  border-color: var(--accent-warm);
+  background: rgba(245, 203, 71, 0.08);
+}
+
+.bulk-edit-hint {
+  font-size: 11px;
+  color: var(--text-2);
+  line-height: 1.3;
 }
 
 .field-color {
@@ -1807,6 +2371,64 @@ input[type="range"]:focus {
   will-change: transform;
 }
 
+/* Beat grid is a thin band along the top of the timeline ruler — never
+   intrudes into the track rows. Only downbeats are shown so the timeline
+   stays readable; the snap resolver still uses regular beats invisibly. */
+.timeline-beat-grid {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 34px;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.beat-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.beat-tick.is-downbeat {
+  /* Colour is supplied per-marker by the inline `--beat-color` so different
+     assets get distinct hues. The tick itself only fills the bottom 40% of
+     the ruler height — a hairline cue rather than a full stripe. */
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    transparent 60%,
+    color-mix(in srgb, var(--beat-color, var(--accent-warm)) 75%, transparent) 60%,
+    color-mix(in srgb, var(--beat-color, var(--accent-warm)) 75%, transparent) 100%
+  );
+}
+
+.beat-tick.is-downbeat em {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px 1px 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--beat-color, var(--accent-warm)) 22%, var(--surface-2));
+  color: var(--beat-color, var(--accent-warm));
+  font-size: 9.5px;
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+  letter-spacing: 0.04em;
+}
+
+.beat-tick.is-downbeat em svg {
+  display: block;
+  flex: 0 0 auto;
+}
+
 .timeline-snap-indicator {
   position: absolute;
   top: 30px;
@@ -1916,6 +2538,21 @@ input[type="range"]:focus {
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
     0 0 0 1px rgba(245, 203, 71, 0.25),
     0 1px 4px rgba(245, 203, 71, 0.15);
+}
+
+.timeline-clip-text.is-bulk-selected {
+  border-color: var(--accent-warm);
+  box-shadow:
+    inset 0 0 0 1px var(--accent-warm),
+    0 0 0 2px rgba(245, 203, 71, 0.35);
+  background:
+    linear-gradient(180deg, rgba(245, 203, 71, 0.18) 0, rgba(245, 203, 71, 0) 60%),
+    linear-gradient(180deg, var(--clip-text), color-mix(in srgb, var(--clip-text) 65%, #000));
+}
+
+.preview-text.is-bulk-selected {
+  outline-color: var(--accent-warm);
+  outline-style: dashed;
 }
 
 .text-clip-glyph {

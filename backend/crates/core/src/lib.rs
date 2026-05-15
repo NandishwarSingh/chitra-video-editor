@@ -94,6 +94,14 @@ pub struct BeatExcerpt {
     pub bpm: Option<f64>,
     #[serde(default)]
     pub timeline_beats: Vec<f64>,
+    /// Subset of `timeline_beats` that fall on bar starts. The model is told
+    /// to prefer these for structural cuts (chorus entry, scene change).
+    #[serde(default)]
+    pub timeline_downbeats: Vec<f64>,
+    /// "audio" or "video" — lets the model distinguish the music reference
+    /// track (audio) from a video clip that happens to have detected beats.
+    #[serde(default)]
+    pub clip_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

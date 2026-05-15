@@ -212,10 +212,126 @@ describe('transcode command builders', () => {
     const make = (align: 'left' | 'center' | 'right') =>
       createDrawTextFilter({ align, end: 5, id: 't', size: 24, start: 0, text: 'X', x: 0.5, y: 0.5 }, 0, 5) ?? '';
 
-    expect(make('left')).toContain('x=w*0.500');
+    expect(make('left')).toContain('x=w*0.5000');
     expect(make('left')).not.toContain('text_w');
-    expect(make('center')).toContain('x=w*0.500-text_w/2');
-    expect(make('right')).toContain('x=w*0.500-text_w');
+    expect(make('center')).toContain('x=w*0.5000-text_w/2');
+    expect(make('right')).toContain('x=w*0.5000-text_w');
+    // All alignments use the center-Y anchor matching CSS `translateY(-50%)`.
+    for (const a of ['left', 'center', 'right'] as const) {
+      expect(make(a)).toContain('y=h*0.5000-text_h/2');
+    }
+  });
+
+  it('forwards color, background, stroke, and shadow into drawtext (WYSIWYG)', () => {
+    const filter = createDrawTextFilter(
+      {
+        align: 'center',
+        backgroundColor: '#000000b3',
+        color: '#f5cb47',
+        end: 5,
+        id: 't',
+        shadowBlur: 8,
+        shadowColor: '#000000aa',
+        shadowOffsetX: 0,
+        shadowOffsetY: 2,
+        size: 54,
+        start: 0,
+        strokeColor: '#000000',
+        strokeWidth: 4,
+        text: 'Hello',
+        x: 0.5,
+        y: 0.85,
+      },
+      0,
+      5,
+    ) ?? '';
+
+    expect(filter).toContain('fontcolor=0xF5CB47@1.000');
+    expect(filter).toContain('box=1');
+    expect(filter).toContain('boxcolor=0x000000@0.702');
+    expect(filter).toContain('borderw=4');
+    expect(filter).toContain('bordercolor=0x000000@1.000');
+    expect(filter).toContain('shadowx=0');
+    expect(filter).toContain('shadowy=2');
+    expect(filter).toContain('shadowcolor=0x000000@0.667');
+  });
+
+  it('skips the background box when backgroundColor is fully transparent', () => {
+    const filter = createDrawTextFilter(
+      {
+        align: 'center',
+        backgroundColor: '#00000000',
+        color: '#ffffff',
+        end: 5,
+        id: 't',
+        size: 54,
+        start: 0,
+        text: 'Hello',
+        x: 0.5,
+        y: 0.5,
+      },
+      0,
+      5,
+    ) ?? '';
+    expect(filter).not.toContain('box=1');
+    expect(filter).not.toContain('boxcolor');
+  });
+
+  it('preserves newlines so multi-line subtitles render as multi-line in export', () => {
+    const filter = createDrawTextFilter(
+      {
+        align: 'center',
+        color: '#ffffff',
+        end: 5,
+        id: 't',
+        size: 54,
+        start: 0,
+        text: 'First line\nSecond line',
+        x: 0.5,
+        y: 0.5,
+      },
+      0,
+      5,
+    ) ?? '';
+    // The literal newline (or its escape) must survive — drawtext renders it.
+    expect(filter).toMatch(/First line[\s\S]*Second line/);
+  });
+
+  it('applies textCase before rendering so UPPER/lower output matches the editor', () => {
+    const upper = createDrawTextFilter(
+      {
+        align: 'center',
+        color: '#ffffff',
+        end: 5,
+        id: 't',
+        size: 54,
+        start: 0,
+        text: 'Loud',
+        textCase: 'upper',
+        x: 0.5,
+        y: 0.5,
+      },
+      0,
+      5,
+    ) ?? '';
+    expect(upper).toContain("text='LOUD'");
+    const lower = createDrawTextFilter(
+      {
+        align: 'center',
+        color: '#ffffff',
+        end: 5,
+        id: 't',
+        size: 54,
+        start: 0,
+        text: 'QUIET',
+        textCase: 'lower',
+        x: 0.5,
+        y: 0.5,
+      },
+      0,
+      5,
+    ) ?? '';
+    expect(lower).toContain("text='quiet'");
   });
 
   it('builds concat inputs for rendered timeline segments', () => {

@@ -6,6 +6,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
+mod beats;
 mod config;
 mod error;
 mod routes;

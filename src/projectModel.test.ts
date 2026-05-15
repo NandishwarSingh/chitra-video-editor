@@ -145,6 +145,66 @@ describe('project model', () => {
     expect(placed.start).toBeGreaterThanOrEqual(4);
   });
 
+  it('REPLACE_TEXTS_IN_RANGE places cues at exact times and wipes prior cues inside the range', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 60)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', timelineStart: 5, type: 'ADD_ASSET_TO_TIMELINE' });
+    // Pre-existing cues: one inside the target range, one before it, one after.
+    state = projectReducer(state, {
+      overlay: { ...DEFAULT_TEXT_OVERLAY, end: 4, id: 'before', start: 1, text: 'before', trackId: 'text-1' },
+      type: 'ADD_TEXT',
+    });
+    state = projectReducer(state, {
+      overlay: { ...DEFAULT_TEXT_OVERLAY, end: 9, id: 'inside-old', start: 7, text: 'old', trackId: 'text-1' },
+      type: 'ADD_TEXT',
+    });
+    state = projectReducer(state, {
+      overlay: { ...DEFAULT_TEXT_OVERLAY, end: 22, id: 'after', start: 20, text: 'after', trackId: 'text-1' },
+      type: 'ADD_TEXT',
+    });
+
+    const cues = [
+      { ...DEFAULT_TEXT_OVERLAY, end: 6, id: 'c-1', start: 5, text: 'one', trackId: 'text-1' },
+      { ...DEFAULT_TEXT_OVERLAY, end: 8, id: 'c-2', start: 6, text: 'two', trackId: 'text-1' },
+      { ...DEFAULT_TEXT_OVERLAY, end: 12, id: 'c-3', start: 8, text: 'three', trackId: 'text-1' },
+    ];
+    state = projectReducer(state, {
+      overlays: cues,
+      rangeEnd: 15,
+      rangeStart: 5,
+      trackId: 'text-1',
+      type: 'REPLACE_TEXTS_IN_RANGE',
+    });
+
+    const ids = state.present.textOverlays.map((o) => o.id).sort();
+    // 'before' and 'after' survive; 'inside-old' is wiped; new cues are in.
+    expect(ids).toEqual(['after', 'before', 'c-1', 'c-2', 'c-3']);
+    // Exact times preserved — no overlap-push.
+    const c1 = state.present.textOverlays.find((o) => o.id === 'c-1')!;
+    const c2 = state.present.textOverlays.find((o) => o.id === 'c-2')!;
+    const c3 = state.present.textOverlays.find((o) => o.id === 'c-3')!;
+    expect(c1.start).toBe(5);
+    expect(c2.start).toBe(6);
+    expect(c3.start).toBe(8);
+  });
+
+  it('REPLACE_TEXTS_IN_RANGE creates a text track when none exists', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 30)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    const before = state.present.tracks.filter((t) => t.kind === 'text').length;
+    state = projectReducer(state, {
+      overlays: [{ ...DEFAULT_TEXT_OVERLAY, end: 2, id: 'c-1', start: 1, text: 'hi', trackId: 'missing-track' }],
+      rangeEnd: 5,
+      rangeStart: 0,
+      trackId: 'missing-track',
+      type: 'REPLACE_TEXTS_IN_RANGE',
+    });
+    expect(state.present.tracks.filter((t) => t.kind === 'text').length).toBeGreaterThan(before);
+    expect(state.present.textOverlays).toHaveLength(1);
+    expect(state.present.textOverlays[0].start).toBe(1);
+  });
+
   it('clamps a trim-only end edit so the overlay cannot expand into a neighbour', () => {
     let state = createInitialProject();
     state = projectReducer(state, { assets: [asset('a', 30)], type: 'ADD_ASSETS' });

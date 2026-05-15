@@ -1,6 +1,7 @@
 import { DEFAULT_EFFECT_SETTINGS, type EffectSettings } from './effects';
 import { createFfmpegEffectFilter } from './effects';
 import { clampClipTransform, type ClipTransform } from './projectModel';
+import { ffmpegDrawtextAnchor } from './textPositioning';
 
 export type ExportMp4CommandOptions = {
   duration: number;
@@ -28,11 +29,25 @@ export type TimelineExportClip = {
 
 export type TimelineExportTextOverlay = {
   align: 'left' | 'center' | 'right';
+  /** Optional fields — when present the export honours them so the rendered
+   *  frame matches the editor preview. Older callers can omit these and get
+   *  the historical "white text, dark plate" default. */
+  backgroundColor?: string;
+  bold?: boolean;
+  color?: string;
   end: number;
   id: string;
+  italic?: boolean;
+  shadowBlur?: number;
+  shadowColor?: string;
+  shadowOffsetX?: number;
+  shadowOffsetY?: number;
   size: number;
   start: number;
+  strokeColor?: string;
+  strokeWidth?: number;
   text: string;
+  textCase?: 'none' | 'upper' | 'lower';
   x: number;
   y: number;
 };
@@ -71,13 +86,43 @@ function formatSeconds(seconds: number) {
 }
 
 function escapeDrawText(text: string) {
+  // Preserve newlines so multi-line subtitles render the same as the editor's
+  // CSS preview (`white-space: pre` keeps \n).
   return text
     .replace(/\\/g, '\\\\')
     .replace(/:/g, '\\:')
     .replace(/'/g, "\\'")
     .replace(/\[/g, '\\[')
-    .replace(/\]/g, '\\]')
-    .replace(/\n/g, ' ');
+    .replace(/\]/g, '\\]');
+}
+
+/**
+ * Normalise a CSS-ish hex color to FFmpeg `0xRRGGBB@A`. Inputs accepted:
+ * - `#rgb`     → expanded to `#rrggbb`, fully opaque
+ * - `#rrggbb`  → fully opaque
+ * - `#rrggbbaa` → alpha extracted from `aa`
+ * - anything else → returns `null` so the caller knows to skip the feature
+ */
+function ffmpegColor(hex: string | undefined | null): { color: string; alpha: number } | null {
+  if (!hex || typeof hex !== 'string') return null;
+  const trimmed = hex.trim();
+  if (!trimmed.startsWith('#')) return null;
+  let body = trimmed.slice(1);
+  if (body.length === 3) {
+    body = body
+      .split('')
+      .map((c) => `${c}${c}`)
+      .join('');
+  }
+  if (!(body.length === 6 || body.length === 8)) return null;
+  if (!/^[0-9a-fA-F]+$/.test(body)) return null;
+  const rgb = body.slice(0, 6);
+  const alphaHex = body.length === 8 ? body.slice(6, 8) : 'ff';
+  const alpha = parseInt(alphaHex, 16) / 255;
+  return {
+    alpha,
+    color: `0x${rgb.toUpperCase()}@${alpha.toFixed(3)}`,
+  };
 }
 
 export function buildProxyArgs(inputPath: string, outputPath: string, targetHeight = 720) {
@@ -162,6 +207,30 @@ export function buildExportMp4Args({
 
 export const DRAWTEXT_DEFAULT_FONTFILE = '/tmp/font.woff';
 
+/**
+ * Build an FFmpeg drawtext filter that matches the editor's CSS preview as
+ * closely as drawtext allows. The position math comes from a shared anchor
+ * helper (`src/textPositioning.ts`) used by both this function and the CSS
+ * preview, so the two paths cannot drift.
+ *
+ * What it honours from the TextOverlay model (everything that drawtext can
+ * express without per-frame compositing):
+ *   - text + multi-line via preserved \n
+ *   - fontfile (bundled Inter is the WYSIWYG path; other families need bundle work)
+ *   - fontsize (in output-frame pixels — same units as the preview at
+ *     project resolution)
+ *   - color + opacity from `color`
+ *   - background plate from `backgroundColor` (skipped entirely when alpha=0)
+ *   - stroke / outline from strokeColor + strokeWidth (drawtext `borderw`)
+ *   - drop shadow from shadow* fields (drawtext `shadowx/y/color`)
+ *   - alignment + position via shared anchor helper
+ *   - textCase via `applyTextCase` before escape
+ *
+ * What drawtext can't do losslessly (these emit at the requested style but
+ * may differ from the preview): font rotation, x/y skew, per-clip transform
+ * stacking under WebGPU effects. Callers are responsible for warning users
+ * if those are set on text destined for export.
+ */
 export function createDrawTextFilter(
   overlay: TimelineExportTextOverlay,
   clipTimelineStart: number,
@@ -170,32 +239,57 @@ export function createDrawTextFilter(
 ) {
   const localStart = Math.max(0, overlay.start - clipTimelineStart);
   const localEnd = Math.min(clipDuration, overlay.end - clipTimelineStart);
+  if (localEnd <= 0 || localStart >= clipDuration || localEnd <= localStart) return null;
+  const rendered = applyTextCase(overlay.text, overlay.textCase ?? 'none');
+  if (rendered.trim().length === 0) return null;
 
-  if (localEnd <= 0 || localStart >= clipDuration || localEnd <= localStart || overlay.text.trim().length === 0) {
-    return null;
+  const anchor = ffmpegDrawtextAnchor({ align: overlay.align, x: overlay.x, y: overlay.y });
+  const fontColor = ffmpegColor(overlay.color) ?? { alpha: 1, color: 'white' };
+  const backgroundColor = ffmpegColor(overlay.backgroundColor);
+  const strokeColor = ffmpegColor(overlay.strokeColor);
+  const shadowColor = ffmpegColor(overlay.shadowColor);
+  const strokeWidth = Math.max(0, Math.round(overlay.strokeWidth ?? 0));
+  const shadowOffsetX = Math.round(overlay.shadowOffsetX ?? 0);
+  const shadowOffsetY = Math.round(overlay.shadowOffsetY ?? 0);
+  const shadowEnabled = (overlay.shadowBlur ?? 0) > 0 || shadowOffsetX !== 0 || shadowOffsetY !== 0;
+
+  const options: string[] = [
+    `fontfile=${fontfile}`,
+    `text='${escapeDrawText(rendered)}'`,
+    `fontcolor=${fontColor.color}`,
+    `fontsize=${Math.round(overlay.size)}`,
+    `x=${anchor.x}`,
+    `y=${anchor.y}`,
+    // Match CSS `white-space: pre` — long captions wrap manually via \n,
+    // never auto-wrap silently. Line spacing matches a typical 1.2 baseline.
+    'line_spacing=8',
+  ];
+
+  if (backgroundColor && backgroundColor.alpha > 0) {
+    options.push('box=1');
+    options.push(`boxcolor=${backgroundColor.color}`);
+    options.push('boxborderw=12');
   }
 
-  const x =
-    overlay.align === 'left'
-      ? `w*${overlay.x.toFixed(3)}`
-      : overlay.align === 'center'
-        ? `w*${overlay.x.toFixed(3)}-text_w/2`
-        : `w*${overlay.x.toFixed(3)}-text_w`;
+  if (strokeWidth > 0 && strokeColor) {
+    options.push(`borderw=${strokeWidth}`);
+    options.push(`bordercolor=${strokeColor.color}`);
+  }
 
-  const options = [
-    `fontfile=${fontfile}`,
-    `text='${escapeDrawText(overlay.text)}'`,
-    'fontcolor=white',
-    `fontsize=${Math.round(overlay.size)}`,
-    `x=${x}`,
-    `y=(h-text_h)*${overlay.y.toFixed(3)}`,
-    `box=1`,
-    `boxcolor=black@0.45`,
-    `boxborderw=8`,
-    `enable='between(t,${formatSeconds(localStart)},${formatSeconds(localEnd)})'`,
-  ].join(':');
+  if (shadowEnabled && shadowColor) {
+    options.push(`shadowx=${shadowOffsetX}`);
+    options.push(`shadowy=${shadowOffsetY}`);
+    options.push(`shadowcolor=${shadowColor.color}`);
+  }
 
-  return `drawtext=${options}`;
+  options.push(`enable='between(t,${formatSeconds(localStart)},${formatSeconds(localEnd)})'`);
+  return `drawtext=${options.join(':')}`;
+}
+
+function applyTextCase(text: string, textCase: 'none' | 'upper' | 'lower'): string {
+  if (textCase === 'upper') return text.toUpperCase();
+  if (textCase === 'lower') return text.toLowerCase();
+  return text;
 }
 
 export function createAudioFilter(clip: TimelineExportClip) {

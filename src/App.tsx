@@ -101,6 +101,13 @@ import {
   type TimelineTrack,
 } from './projectModel';
 import {
+  SUBTITLE_TEMPLATES,
+  findSubtitleTemplate,
+  generateSubtitleCues,
+  type SubtitleMode,
+  type SubtitleTemplateId,
+} from './subtitles';
+import {
   PROJECT_PRESETS,
   createBlankProjectRecord,
   createProjectPackage,
@@ -120,7 +127,7 @@ import {
 import {
   createProxyCacheKey,
   deleteCachedProxy,
-  getAssetBeats,
+  getAssetBeatsTolerant,
   getAssetTranscript,
   getCachedProxy,
   listProjectRecords,
@@ -596,6 +603,101 @@ function filterTextOverlaysInViewport(sortedOverlays: TextOverlay[], viewport: {
   return visible;
 }
 
+type TimelineDownbeat = {
+  assetId: string;
+  clipKind: 'audio' | 'video' | 'text' | 'unknown';
+  time: number;
+};
+
+type TimelineBeatGridProps = {
+  beatPositions: number[];
+  downbeatPositions: TimelineDownbeat[];
+  pixelsPerSecond: number;
+  labelWidth: number;
+  visible: boolean;
+  viewport: { end: number; start: number };
+};
+
+// Curated palette of accent hues that read well on the slate background.
+// Hash the asset id into this list so each asset gets a stable but distinct
+// colour without falling back to ugly auto-generated HSL ramps.
+const BEAT_MARKER_PALETTE = [
+  '#f5cb47', // warm amber
+  '#5d9eff', // accent blue
+  '#7be88f', // mint
+  '#ff8aa0', // coral
+  '#c89aff', // lavender
+  '#5fe0d4', // teal
+  '#ffb066', // peach
+  '#86d6ff', // sky
+] as const;
+
+function hashStringToIndex(input: string, modulo: number): number {
+  let hash = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    hash = (hash * 31 + input.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % modulo;
+}
+
+function colorForAsset(assetId: string): string {
+  return BEAT_MARKER_PALETTE[hashStringToIndex(assetId, BEAT_MARKER_PALETTE.length)];
+}
+
+// Renders downbeat markers as a thin band along the top of the timeline ruler.
+// Each asset gets its own colour (stable across reloads, hashed from asset id)
+// and a tiny media-kind glyph so multi-source beat grids stay legible.
+function TimelineBeatGrid({ downbeatPositions, pixelsPerSecond, labelWidth, visible, viewport }: TimelineBeatGridProps) {
+  if (!visible || downbeatPositions.length === 0) return null;
+
+  const minTime = Number.isFinite(viewport.start) ? viewport.start : 0;
+  const maxTime = Number.isFinite(viewport.end) ? viewport.end : Number.POSITIVE_INFINITY;
+
+  // Bar numbering counts downbeats per-asset so each colour group restarts at 1.
+  const orderByAsset = new Map<string, Map<number, number>>();
+  for (const downbeat of downbeatPositions) {
+    let perAsset = orderByAsset.get(downbeat.assetId);
+    if (!perAsset) {
+      perAsset = new Map();
+      orderByAsset.set(downbeat.assetId, perAsset);
+    }
+    if (!perAsset.has(downbeat.time)) {
+      perAsset.set(downbeat.time, perAsset.size + 1);
+    }
+  }
+
+  const inView = downbeatPositions.filter(
+    (downbeat) => downbeat.time >= minTime - 0.5 && downbeat.time <= maxTime + 0.5,
+  );
+
+  return (
+    <div aria-hidden="true" className="timeline-beat-grid">
+      {inView.map((downbeat) => {
+        const left = labelWidth + downbeat.time * pixelsPerSecond;
+        const colour = colorForAsset(downbeat.assetId);
+        const bar = orderByAsset.get(downbeat.assetId)?.get(downbeat.time) ?? 1;
+        const icon =
+          downbeat.clipKind === 'audio' ? <Music size={9} strokeWidth={2.25} />
+          : downbeat.clipKind === 'video' ? <Film size={9} strokeWidth={2.25} />
+          : downbeat.clipKind === 'text' ? <Type size={9} strokeWidth={2.25} />
+          : null;
+        return (
+          <span
+            className="beat-tick is-downbeat"
+            key={`${downbeat.assetId}-${downbeat.time}`}
+            style={{ '--beat-color': colour, left: `${left}px` } as CSSProperties}
+          >
+            <em>
+              {icon}
+              <span>{bar}</span>
+            </em>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function getFontStack(id: TextFontFamilyId): string {
   return TEXT_FONT_STACK_BY_ID.get(id) ?? TEXT_FONT_FAMILIES[0].stack;
 }
@@ -652,6 +754,156 @@ function buildPreviewTextStyle(overlay: TextOverlay): CSSProperties {
   }
 
   return style;
+}
+
+type AssetCardProps = {
+  asset: ProjectAsset;
+  onAddToTimeline: () => void;
+  onDelete: () => void;
+  onDragStart: (event: ReactDragEvent<HTMLDivElement>) => void;
+  onSelect: () => void;
+  selected: boolean;
+};
+
+/**
+ * Asset library tile. Two thumbnail strategies:
+ *  1. If the asset has a cached `posterUrl` (data: or blob:), use it as a
+ *     plain <img>. Cheap and always cache-warm after import.
+ *  2. If that image fails OR is missing entirely, hot-grab a frame from the
+ *     asset's playback URL via a hidden <video> element so the user still
+ *     sees their footage. Falls back to a kind-tinted gradient only if both
+ *     paths fail (e.g. audio-only asset where there's no frame to grab).
+ */
+function AssetCard({ asset, onAddToTimeline, onDelete, onDragStart, onSelect, selected }: AssetCardProps) {
+  const [posterError, setPosterError] = useState(false);
+  const [liveThumb, setLiveThumb] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    setPosterError(false);
+    setLiveThumb(null);
+  }, [asset.posterUrl, asset.playbackUrl]);
+
+  // When the poster fails or is missing for a VIDEO asset, attach a hidden
+  // <video> that decodes a single frame ~0.5 s in. We capture it to a 2D
+  // canvas and convert to a data URL — same trick the import path uses for
+  // the initial poster, run lazily here as a backstop.
+  useEffect(() => {
+    if (liveThumb || asset.kind !== 'video') return;
+    if (asset.posterUrl && !posterError) return;
+    if (!asset.playbackUrl) return;
+    let cancelled = false;
+    const video = document.createElement('video');
+    videoRef.current = video;
+    video.crossOrigin = 'anonymous';
+    video.muted = true;
+    video.preload = 'metadata';
+    video.playsInline = true;
+    video.src = asset.playbackUrl;
+    const onSeeked = () => {
+      if (cancelled) return;
+      try {
+        const canvas = document.createElement('canvas');
+        const w = video.videoWidth || 320;
+        const h = video.videoHeight || 180;
+        canvas.width = Math.min(320, w);
+        canvas.height = Math.round(canvas.width * (h / Math.max(1, w)));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const url = canvas.toDataURL('image/jpeg', 0.7);
+        if (!cancelled) setLiveThumb(url);
+      } catch {
+        // CORS or decoder error — leave the gradient fallback in place.
+      }
+    };
+    const onMetadata = () => {
+      try {
+        video.currentTime = Math.min(0.5, Math.max(0, (video.duration || 1) * 0.1));
+      } catch {
+        // Some browsers reject seeks before the first frame; the loadeddata
+        // handler below covers that case.
+      }
+    };
+    video.addEventListener('loadedmetadata', onMetadata, { once: true });
+    video.addEventListener('loadeddata', onMetadata, { once: true });
+    video.addEventListener('seeked', onSeeked, { once: true });
+    return () => {
+      cancelled = true;
+      video.removeEventListener('loadedmetadata', onMetadata);
+      video.removeEventListener('loadeddata', onMetadata);
+      video.removeEventListener('seeked', onSeeked);
+      try {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+      } catch {
+        // ignore — element is being garbage-collected
+      }
+    };
+  }, [asset.kind, asset.playbackUrl, asset.posterUrl, liveThumb, posterError]);
+
+  const usePoster = !!asset.posterUrl && !posterError;
+  const useLive = !usePoster && !!liveThumb;
+
+  return (
+    <div
+      className={`asset-card${selected ? ' is-selected' : ''}`}
+      draggable={asset.duration > 0}
+      onDragStart={onDragStart}
+      title={asset.name}
+    >
+      <button className="asset-card-thumb" onClick={onSelect} type="button">
+        {usePoster ? (
+          <img
+            alt={asset.name}
+            draggable={false}
+            onError={() => setPosterError(true)}
+            src={asset.posterUrl ?? ''}
+          />
+        ) : useLive ? (
+          <img alt={asset.name} draggable={false} src={liveThumb ?? ''} />
+        ) : (
+          <div className={`asset-card-fallback asset-card-fallback-${asset.kind}`}>
+            {asset.kind === 'audio' ? <Music size={26} /> : <Film size={26} />}
+          </div>
+        )}
+        <span className="asset-card-kind" aria-hidden="true">
+          {asset.kind === 'audio' ? <Music size={11} /> : <Film size={11} />}
+        </span>
+        <span className="asset-card-duration">{asset.duration > 0 ? formatClock(asset.duration) : '…'}</span>
+        <span className="asset-card-overlay" aria-hidden="true">
+          <strong>{asset.name}</strong>
+          <em>{formatBytes(asset.size)}</em>
+        </span>
+      </button>
+      <div className="asset-card-actions">
+        <button
+          aria-label={`Add ${asset.name} to timeline`}
+          className="icon-button small"
+          disabled={asset.duration <= 0}
+          onClick={onAddToTimeline}
+          title="Add to timeline"
+          type="button"
+        >
+          <StepForward size={13} />
+        </button>
+        <button
+          aria-label={`Delete ${asset.name} from media library`}
+          className="icon-button small"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDelete();
+          }}
+          onPointerDown={(event) => event.stopPropagation()}
+          title="Delete from media library"
+          type="button"
+        >
+          <Trash2 size={13} />
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function pickTimelineClipThumbnails(thumbnails: Array<TimelineThumbnail | null>, clip: TimelineClip) {
@@ -795,10 +1047,13 @@ function EditorWorkspace({
   const [playhead, setPlayhead] = useState(0);
   const [saveStatus, setSaveStatus] = useState<'failed' | 'saved' | 'saving'>('saved');
   const [showProjectSettings, setShowProjectSettings] = useState(false);
-  const [showPerfHud, setShowPerfHud] = useState(() => new URLSearchParams(window.location.search).has('perf'));
+  // Perf HUD is now opt-in only via the `?perf` URL flag — no toolbar button.
+  const showPerfHud = useMemo(() => new URLSearchParams(window.location.search).has('perf'), []);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [rightPanelTab, setRightPanelTab] = useState<'chat' | 'inspector'>('inspector');
   const [snapEnabled, setSnapEnabled] = useState(true);
+  const [beatMarkersVisible, setBeatMarkersVisible] = useState(true);
+  const [bulkTextEdit, setBulkTextEdit] = useState(false);
   // Cached transcripts keyed by asset fingerprint. Lives in App so both the
   // Inspector (display + transcribe button) and the chat context builder can
   // read it without prop-drilling. Mirror also lives in IndexedDB so reloads
@@ -873,36 +1128,52 @@ function EditorWorkspace({
     if (snapshot.present.clips.length === 0) {
       return null;
     }
-    // Surface transcripts of clips currently at the playhead. We deliberately
-    // cap the volume (max 6 segments per clip, 1500 chars total) so the
-    // context block stays compact even on long timelines — the goal is to
-    // give the model voice-over awareness, not dump every word ever spoken.
+    // Build transcript excerpts. No truncation: the full per-clip transcript
+    // (every in-range segment with its timestamps) is sent. DeepSeek V4 Flash
+    // has a 128k context window so a multi-minute take fits comfortably.
+    // The chat path will get slower / more expensive on very long content,
+    // but the user explicitly asked for unclipped context.
     const transcripts: Array<{
       assetId: string;
       clipId: string;
       excerpt: string;
       language: string | null;
     }> = [];
-    let totalChars = 0;
+    const selectedClipId = snapshot.present.selectedClipId;
+
+    const formatExcerpt = (transcript: StoredAssetTranscript, clip: TimelineClip): string => {
+      const segments = transcript.segments
+        .filter((seg) => seg.end >= clip.sourceIn - 0.25 && seg.start <= clip.sourceOut + 0.25)
+        .map((seg) => `[${seg.start.toFixed(2)}-${seg.end.toFixed(2)}] ${seg.text.trim()}`);
+      if (segments.length === 0) return transcript.text;
+      return segments.join('\n');
+    };
+
+    const addTranscriptFor = (clip: TimelineClip) => {
+      const asset = snapshot.present.assets.find((a) => a.id === clip.assetId);
+      if (!asset) return;
+      const fingerprint = createMediaFingerprint(asset.file, asset.duration);
+      const transcript = snapshot.assetTranscripts[fingerprint];
+      if (!transcript) return;
+      const excerpt = formatExcerpt(transcript, clip);
+      if (!excerpt) return;
+      transcripts.push({ assetId: asset.id, clipId: clip.id, excerpt, language: transcript.language });
+    };
+
+    // Selected clip first so it leads the prompt's transcript section.
+    const selectedClip = selectedClipId
+      ? snapshot.present.clips.find((c) => c.id === selectedClipId) ?? null
+      : null;
+    if (selectedClip) addTranscriptFor(selectedClip);
+
+    // Every other clip overlapping the playhead.
     for (const clip of snapshot.present.clips) {
-      if (totalChars > 6000) break;
+      if (clip.id === selectedClipId) continue;
       const overlapping =
         snapshot.playhead >= clip.timelineStart &&
         snapshot.playhead <= clip.timelineStart + (clip.sourceOut - clip.sourceIn) + 4;
       if (!overlapping) continue;
-      const asset = snapshot.present.assets.find((a) => a.id === clip.assetId);
-      if (!asset) continue;
-      const fingerprint = createMediaFingerprint(asset.file, asset.duration);
-      const transcript = snapshot.assetTranscripts[fingerprint];
-      if (!transcript) continue;
-      const inRange = transcript.segments
-        .filter((seg) => seg.end >= clip.sourceIn - 1 && seg.start <= clip.sourceOut + 1)
-        .slice(0, 6)
-        .map((seg) => `[${seg.start.toFixed(2)}-${seg.end.toFixed(2)}] ${seg.text.trim()}`)
-        .join('\n');
-      const excerpt = inRange || transcript.text.slice(0, 1500);
-      transcripts.push({ assetId: asset.id, clipId: clip.id, excerpt, language: transcript.language });
-      totalChars += excerpt.length;
+      addTranscriptFor(clip);
     }
     // Beat-grid context: list every clip that has beats and a small set of
     // timeline-projected beat positions near the playhead. The model uses
@@ -911,30 +1182,51 @@ function EditorWorkspace({
       assetId: string;
       bpm: number | null;
       clipId: string;
+      clipKind: 'audio' | 'video' | 'text' | 'unknown';
       timelineBeats: number[];
+      timelineDownbeats: number[];
     }> = [];
-    for (const clip of snapshot.present.clips) {
+    // Iterate clips so the selected clip is always emitted first — guarantees
+    // its beat grid lands in the context, even when the playhead is elsewhere.
+    const clipsForBeats = selectedClip
+      ? [selectedClip, ...snapshot.present.clips.filter((c) => c.id !== selectedClipId)]
+      : snapshot.present.clips;
+    for (const clip of clipsForBeats) {
       const asset = snapshot.present.assets.find((a) => a.id === clip.assetId);
       if (!asset) continue;
+      const track = snapshot.present.tracks.find((t) => t.id === clip.trackId);
+      const clipKind: 'audio' | 'video' | 'text' | 'unknown' = (track?.kind ?? asset.kind ?? 'unknown') as
+        | 'audio'
+        | 'video'
+        | 'text'
+        | 'unknown';
       const fp = createMediaFingerprint(asset.file, asset.duration);
       const data = snapshot.assetBeats[fp];
       if (!data) continue;
       const clipDuration = Math.max(0, clip.sourceOut - clip.sourceIn);
+      const project = (sourceTime: number) => clip.timelineStart + (sourceTime - clip.sourceIn);
+      const onTimeline = (t: number) => t <= clip.timelineStart + clipDuration + 0.0005;
       const timelineBeats: number[] = [];
       for (const beat of data.beats) {
         if (beat < clip.sourceIn || beat > clip.sourceOut) continue;
-        const time = clip.timelineStart + (beat - clip.sourceIn);
-        if (time <= clip.timelineStart + clipDuration + 0.0005) {
-          timelineBeats.push(Number(time.toFixed(3)));
-        }
+        const t = project(beat);
+        if (onTimeline(t)) timelineBeats.push(Number(t.toFixed(3)));
       }
-      // Trim to a reasonable window — first 64 beats from this clip is plenty
-      // for the model to spot the grid.
+      const timelineDownbeats: number[] = [];
+      for (const downbeat of data.downbeats ?? []) {
+        if (downbeat < clip.sourceIn || downbeat > clip.sourceOut) continue;
+        const t = project(downbeat);
+        if (onTimeline(t)) timelineDownbeats.push(Number(t.toFixed(3)));
+      }
+      // Send the full beat grid per clip — no slicing. Lets the model land
+      // cuts anywhere across the timeline, not just within the first ~30 s.
       beatContext.push({
         assetId: asset.id,
         bpm: data.bpm,
         clipId: clip.id,
-        timelineBeats: timelineBeats.slice(0, 64),
+        clipKind,
+        timelineBeats,
+        timelineDownbeats,
       });
     }
 
@@ -1091,7 +1383,7 @@ function EditorWorkspace({
     }
     if (unknown.length === 0) return;
     let cancelled = false;
-    void Promise.all(unknown.map((fp) => getAssetBeats(fp).then((value) => ({ fp, value })))).then((rows) => {
+    void Promise.all(unknown.map((fp) => getAssetBeatsTolerant(fp).then((value) => ({ fp, value })))).then((rows) => {
       if (cancelled) return;
       const next: Record<string, StoredBeatData> = {};
       for (const { fp, value } of rows) {
@@ -1104,6 +1396,40 @@ function EditorWorkspace({
       cancelled = true;
     };
   }, [assetBeats, present.assets]);
+
+  // Subtitle generation. Pulls the clip's transcript (by fingerprint),
+  // builds cues via the shared helper in src/subtitles.ts, and dispatches
+  // each cue as ADD_TEXT so every cue is a normal, undoable timeline
+  // overlay the user can edit independently afterwards.
+  const generateSubtitlesForClip = useCallback(
+    (clip: TimelineClip, mode: SubtitleMode, templateId: SubtitleTemplateId) => {
+      const project = chatContextRef.current.present;
+      const asset = project.assets.find((a) => a.id === clip.assetId);
+      if (!asset?.file) return;
+      const fingerprint = createMediaFingerprint(asset.file, asset.duration);
+      const transcript = assetTranscripts[fingerprint];
+      if (!transcript) return;
+      const template = findSubtitleTemplate(templateId);
+      const textTrackId =
+        project.tracks.find((t) => t.kind === 'text')?.id ?? '';
+      const targetTrackId = textTrackId || 'text-1';
+      const cues = generateSubtitleCues(transcript, clip, {
+        createId: () => createId('text'),
+        mode,
+        template,
+        trackId: targetTrackId,
+      });
+      const clipTimelineEnd = clip.timelineStart + Math.max(0, clip.sourceOut - clip.sourceIn);
+      dispatch({
+        overlays: cues,
+        rangeEnd: clipTimelineEnd,
+        rangeStart: clip.timelineStart,
+        trackId: targetTrackId,
+        type: 'REPLACE_TEXTS_IN_RANGE',
+      });
+    },
+    [assetTranscripts],
+  );
 
   const detectAssetBeats = useCallback(
     async (assetId: string) => {
@@ -1149,27 +1475,49 @@ function EditorWorkspace({
     }
   }, [assetsMissingBeats, detectAssetBeats]);
 
-  // Project all clip-local beats onto timeline time so snap targets can use
-  // them directly. We project once per state change rather than per drag tick.
-  const timelineBeatTargets = useMemo(() => {
-    const out: number[] = [];
+  // Project all clip-local beats AND downbeats onto timeline-time. We do both
+  // in one pass so the visualisation + snap + chat-context layers all read
+  // the same projection. Downbeats carry per-asset metadata so the grid can
+  // colour-code and icon-tag markers by source media.
+  const { timelineBeatTargets, timelineDownbeatTargets } = useMemo(() => {
+    const beats: number[] = [];
+    const downbeats: Array<{
+      assetId: string;
+      clipKind: 'audio' | 'video' | 'text' | 'unknown';
+      time: number;
+    }> = [];
     for (const clip of present.clips) {
       const asset = present.assets.find((a) => a.id === clip.assetId);
       if (!asset?.file) continue;
       const fp = createMediaFingerprint(asset.file, asset.duration);
       const data = assetBeats[fp];
       if (!data) continue;
+      const track = present.tracks.find((t) => t.id === clip.trackId);
+      const clipKind: 'audio' | 'video' | 'text' | 'unknown' = (track?.kind ?? asset.kind ?? 'unknown') as
+        | 'audio'
+        | 'video'
+        | 'text'
+        | 'unknown';
       const clipDuration = Math.max(0, clip.sourceOut - clip.sourceIn);
+      const project = (sourceTime: number) => clip.timelineStart + (sourceTime - clip.sourceIn);
+      const inRange = (sourceTime: number) =>
+        sourceTime >= clip.sourceIn && sourceTime <= clip.sourceOut;
+      const onTimeline = (timelineTime: number) =>
+        timelineTime <= clip.timelineStart + clipDuration + 0.0005;
+
       for (const beat of data.beats) {
-        if (beat < clip.sourceIn || beat > clip.sourceOut) continue;
-        const timelineTime = clip.timelineStart + (beat - clip.sourceIn);
-        if (timelineTime <= clip.timelineStart + clipDuration + 0.0005) {
-          out.push(timelineTime);
-        }
+        if (!inRange(beat)) continue;
+        const t = project(beat);
+        if (onTimeline(t)) beats.push(t);
+      }
+      for (const downbeat of data.downbeats ?? []) {
+        if (!inRange(downbeat)) continue;
+        const t = project(downbeat);
+        if (onTimeline(t)) downbeats.push({ assetId: asset.id, clipKind, time: t });
       }
     }
-    return out;
-  }, [assetBeats, present.assets, present.clips]);
+    return { timelineBeatTargets: beats, timelineDownbeatTargets: downbeats };
+  }, [assetBeats, present.assets, present.clips, present.tracks]);
 
   // Sticky asset for the primary <video> element: keep the last video asset
   // mounted across gaps so we don't pay the unmount-remount cost (decoder
@@ -1211,6 +1559,31 @@ function EditorWorkspace({
   }, [activeAsset, lastVideoAssetOnTimeline]);
   const isInVideoGap = activeClip ? activeAsset?.kind !== 'video' && Boolean(lastVideoAssetOnTimeline) : Boolean(lastVideoAssetOnTimeline);
   const selectedClipAsset = useMemo(() => getClipAsset(present, selectedClip), [present, selectedClip]);
+  const fanOutTextPatch = useCallback(
+    (action: Parameters<typeof projectReducer>[1]): boolean => {
+      if (action.type !== 'UPDATE_TEXT' || !bulkTextEdit || present.textOverlays.length <= 1) {
+        return false;
+      }
+      const stylePatch: Partial<TextOverlay> = { ...action.patch };
+      delete stylePatch.end;
+      delete stylePatch.start;
+      delete stylePatch.text;
+      delete stylePatch.trackId;
+      if (Object.keys(stylePatch).length === 0) return false;
+      for (const overlay of present.textOverlays) {
+        dispatch({ patch: stylePatch, record: action.record, textId: overlay.id, type: 'UPDATE_TEXT' });
+      }
+      return true;
+    },
+    [bulkTextEdit, present.textOverlays, dispatch],
+  );
+  const textInspectorDispatch = useCallback<Dispatch<Parameters<typeof projectReducer>[1]>>(
+    (action) => {
+      if (fanOutTextPatch(action)) return;
+      dispatch(action);
+    },
+    [fanOutTextPatch, dispatch],
+  );
   const activeEffectSettings = activeClip?.effects ?? DEFAULT_EFFECT_SETTINGS;
   const activeEffects = hasActiveEffects(activeEffectSettings);
   const hasTimeline = present.clips.length > 0 && duration > 0;
@@ -1310,36 +1683,30 @@ function EditorWorkspace({
   const editArrayText = useMemo(() => (editArray ? stringifyEditArray(editArray) : ''), [editArray]);
   const [viewerSize, setViewerSize] = useState({ height: 0, width: 0 });
   const previewFrameStyle = useMemo(() => {
-    const refAsset = activeAsset ?? lastVideoAssetOnTimeline ?? lastAudioAssetOnTimeline;
-    const mediaWidth = Math.max(1, refAsset?.width || projectSettings.width || 16);
-    const mediaHeight = Math.max(1, refAsset?.height || projectSettings.height || 9);
+    // The preview frame is always the project's output rectangle —
+    // vertical / landscape / square / custom. Clips inside the frame use
+    // their per-clip transform (scale, x, y, rotation) to fit; the frame
+    // never adapts to whatever asset happens to be loaded. The asset-first
+    // lookup used to live here, which made a horizontal source render a
+    // horizontal preview inside a vertical project.
+    const frameWidth = Math.max(1, projectSettings.width || 16);
+    const frameHeight = Math.max(1, projectSettings.height || 9);
 
     if (viewerSize.width <= 0 || viewerSize.height <= 0) {
       return {
-        aspectRatio: `${mediaWidth} / ${mediaHeight}`,
+        aspectRatio: `${frameWidth} / ${frameHeight}`,
         maxHeight: '100%',
         maxWidth: '100%',
       };
     }
 
-    const scale = Math.min(viewerSize.width / mediaWidth, viewerSize.height / mediaHeight);
+    const scale = Math.min(viewerSize.width / frameWidth, viewerSize.height / frameHeight);
 
     return {
-      height: `${Math.max(1, Math.floor(mediaHeight * scale))}px`,
-      width: `${Math.max(1, Math.floor(mediaWidth * scale))}px`,
+      height: `${Math.max(1, Math.floor(frameHeight * scale))}px`,
+      width: `${Math.max(1, Math.floor(frameWidth * scale))}px`,
     };
-  }, [
-    activeAsset?.height,
-    activeAsset?.width,
-    lastAudioAssetOnTimeline?.height,
-    lastAudioAssetOnTimeline?.width,
-    lastVideoAssetOnTimeline?.height,
-    lastVideoAssetOnTimeline?.width,
-    projectSettings.height,
-    projectSettings.width,
-    viewerSize.height,
-    viewerSize.width,
-  ]);
+  }, [projectSettings.height, projectSettings.width, viewerSize.height, viewerSize.width]);
   const getClipTransformStyle = useCallback((clip: TimelineClip | null): CSSProperties => {
     const transform = clip?.transform ?? { rotation: 0, scale: 1, x: 0.5, y: 0.5 };
     const rotation = transform.rotation ?? 0;
@@ -1441,10 +1808,10 @@ function EditorWorkspace({
     dragRafIdRef.current = null;
     const pending = pendingDragActionRef.current;
     pendingDragActionRef.current = null;
-    if (pending) {
-      dispatch(pending);
-    }
-  }, []);
+    if (!pending) return;
+    if (fanOutTextPatch(pending)) return;
+    dispatch(pending);
+  }, [fanOutTextPatch]);
 
   const dispatchDragAction = useCallback(
     (action: Parameters<typeof projectReducer>[1]) => {
@@ -3398,60 +3765,17 @@ function EditorWorkspace({
               <span>Drop files here, click to browse, or use the folder button above.</span>
             </button>
           ) : (
-            <div className="asset-list">
+            <div className="asset-grid">
               {present.assets.map((asset) => (
-                <div
-                  className={`asset-row${asset.id === present.selectedAssetId ? ' is-selected' : ''}`}
-                  draggable={asset.duration > 0}
+                <AssetCard
+                  asset={asset}
                   key={asset.id}
+                  onAddToTimeline={() => addAssetToTimeline(asset.id)}
+                  onDelete={() => deleteAssetFromLibrary(asset.id)}
                   onDragStart={(event) => onAssetDragStart(event, asset)}
-                  title={asset.duration > 0 ? 'Drag to timeline' : 'Reading media metadata'}
-                >
-                  <button
-                    className="asset-main"
-                    onClick={() => dispatch({ assetId: asset.id, type: 'SELECT_ASSET' })}
-                    type="button"
-                  >
-                    <span className="asset-poster">
-                      {asset.posterUrl ? (
-                        <img alt="" src={asset.posterUrl} />
-                      ) : asset.kind === 'audio' ? (
-                        <Music size={18} />
-                      ) : (
-                        <Film size={18} />
-                      )}
-                    </span>
-                    <span>
-                      <strong>{asset.name}</strong>
-                      <small>
-                        {asset.duration > 0 ? formatClock(asset.duration) : 'Reading'} | {formatBytes(asset.size)}
-                      </small>
-                    </span>
-                  </button>
-                  <button
-                    aria-label={`Add ${asset.name} to timeline`}
-                    className="icon-button small"
-                    disabled={asset.duration <= 0}
-                    onClick={() => addAssetToTimeline(asset.id)}
-                    title="Add to timeline"
-                    type="button"
-                  >
-                    <StepForward size={14} />
-                  </button>
-                  <button
-                    aria-label={`Delete ${asset.name} from media library`}
-                    className="icon-button small"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      deleteAssetFromLibrary(asset.id);
-                    }}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    title="Delete from media library"
-                    type="button"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
+                  onSelect={() => dispatch({ assetId: asset.id, type: 'SELECT_ASSET' })}
+                  selected={asset.id === present.selectedAssetId}
+                />
               ))}
             </div>
           )}
@@ -3587,7 +3911,7 @@ function EditorWorkspace({
                 <div className="text-overlay-layer">
                   {activeTextOverlays.map((overlay) => (
                     <div
-                      className={`preview-text align-${overlay.align}${overlay.id === present.selectedTextId ? ' is-selected' : ''}`}
+                      className={`preview-text align-${overlay.align}${overlay.id === present.selectedTextId || bulkTextEdit ? ' is-selected' : ''}${bulkTextEdit ? ' is-bulk-selected' : ''}`}
                       key={overlay.id}
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' || event.key === ' ') {
@@ -3688,7 +4012,10 @@ function EditorWorkspace({
                 detectingBeatsFingerprints={detectingBeatsFingerprints}
                 deleteSelected={deleteSelected}
                 deleteAssetFromLibrary={deleteAssetFromLibrary}
-                dispatch={dispatch}
+                dispatch={textInspectorDispatch}
+                bulkTextEdit={bulkTextEdit}
+                setBulkTextEdit={setBulkTextEdit}
+                generateSubtitlesForClip={generateSubtitlesForClip}
                 hasTimeline={hasTimeline}
                 project={present}
                 selectedAsset={selectedAsset}
@@ -3728,6 +4055,22 @@ function EditorWorkspace({
 
           <div className="timeline-tools">
             <button
+              aria-label={beatMarkersVisible ? 'Hide beat-sync markers' : 'Show beat-sync markers'}
+              className={`icon-button small${beatMarkersVisible ? ' is-active' : ''}`}
+              disabled={timelineDownbeatTargets.length === 0}
+              onClick={() => setBeatMarkersVisible((value) => !value)}
+              title={
+                timelineDownbeatTargets.length === 0
+                  ? 'Detect beats on a clip to enable markers'
+                  : beatMarkersVisible
+                    ? 'Beat-sync markers on — click to hide'
+                    : 'Beat-sync markers hidden'
+              }
+              type="button"
+            >
+              <Activity size={15} />
+            </button>
+            <button
               aria-label={snapEnabled ? 'Disable snapping' : 'Enable snapping'}
               className={`icon-button small${snapEnabled ? ' is-active' : ''}`}
               onClick={() => setSnapEnabled((value) => !value)}
@@ -3742,9 +4085,6 @@ function EditorWorkspace({
             <span>{Math.round(timelineZoom * 100)}%</span>
             <button aria-label="Zoom timeline in" className="icon-button small" onClick={() => setTimelineZoom((value) => clamp(value + 0.2, 0.5, 3))} title="Zoom timeline in" type="button">
               <ZoomIn size={15} />
-            </button>
-            <button aria-label="Toggle performance HUD" className={`icon-button small${showPerfHud ? ' is-active' : ''}`} onClick={() => setShowPerfHud((value) => !value)} title="Toggle performance HUD" type="button">
-              <Activity size={15} />
             </button>
           </div>
         </div>
@@ -3809,6 +4149,14 @@ function EditorWorkspace({
             </div>
 
             <div className="timeline-progress" ref={progressRef} />
+            <TimelineBeatGrid
+              beatPositions={timelineBeatTargets}
+              downbeatPositions={timelineDownbeatTargets}
+              pixelsPerSecond={timelinePixelsPerSecond}
+              labelWidth={TIMELINE_LABEL_WIDTH}
+              visible={beatMarkersVisible}
+              viewport={timelineViewportTime}
+            />
             <div className="timeline-playhead" ref={playheadRef}>
               <span />
             </div>
@@ -4026,7 +4374,7 @@ function EditorWorkspace({
 
                     return (
                       <button
-                        className={`timeline-clip timeline-clip-text${overlay.id === present.selectedTextId ? ' is-selected' : ''}`}
+                        className={`timeline-clip timeline-clip-text${overlay.id === present.selectedTextId || bulkTextEdit ? ' is-selected' : ''}${bulkTextEdit ? ' is-bulk-selected' : ''}`}
                         key={overlay.id}
                         onPointerDown={(event) => onTimelineTextPointerDown(event, overlay)}
                         style={{ left: `${left}px`, width: `${width}px` }}
@@ -4536,12 +4884,15 @@ type InspectorProps = {
   assetBeats: Record<string, StoredBeatData>;
   assetTranscripts: Record<string, StoredAssetTranscript>;
   beatError: string | null;
+  bulkTextEdit: boolean;
   capabilities: ReturnType<typeof detectMediaCapabilities>;
   deleteAssetFromLibrary: (assetId: string) => void;
   deleteSelected: () => void;
   detectAssetBeats: (assetId: string) => Promise<void>;
   detectingBeatsFingerprints: Set<string>;
   dispatch: Dispatch<Parameters<typeof projectReducer>[1]>;
+  setBulkTextEdit: (next: boolean) => void;
+  generateSubtitlesForClip: (clip: TimelineClip, mode: SubtitleMode, template: SubtitleTemplateId) => void;
   hasTimeline: boolean;
   project: ProjectPresent;
   selectedAsset: ProjectAsset | null;
@@ -4573,11 +4924,11 @@ function ClipBeatsSection({ asset, assetBeats, detectingFingerprints, error, onD
       {data ? (
         <div className="meta-grid transcript-meta">
           <span>BPM</span>
-          <strong>{data.bpm ?? '—'}</strong>
+          <strong>{typeof data.bpm === 'number' ? data.bpm.toFixed(1) : '—'}</strong>
           <span>Beats</span>
           <strong>{data.beats.length}</strong>
-          <span>Source</span>
-          <strong>{`${Math.round(data.sampleRate / 1000)} kHz`}</strong>
+          <span>Downbeats</span>
+          <strong>{data.downbeats?.length ?? 0}</strong>
         </div>
       ) : (
         <p className="transcript-empty">No beat grid yet — detect to enable beat-aware snapping and AI cut-on-beat.</p>
@@ -4600,12 +4951,22 @@ function ClipBeatsSection({ asset, assetBeats, detectingFingerprints, error, onD
 type ClipTranscriptSectionProps = {
   asset: ProjectAsset | null;
   assetTranscripts: Record<string, StoredAssetTranscript>;
+  clip: TimelineClip | null;
   error: string | null;
+  onGenerateSubtitles: (clip: TimelineClip, mode: SubtitleMode, template: SubtitleTemplateId) => void;
   onTranscribe: (assetId: string) => void | Promise<void>;
   transcribingFingerprints: Set<string>;
 };
 
-function ClipTranscriptSection({ asset, assetTranscripts, error, onTranscribe, transcribingFingerprints }: ClipTranscriptSectionProps) {
+function ClipTranscriptSection({
+  asset,
+  assetTranscripts,
+  clip,
+  error,
+  onGenerateSubtitles,
+  onTranscribe,
+  transcribingFingerprints,
+}: ClipTranscriptSectionProps) {
   if (!asset) return null;
   const fingerprint = createMediaFingerprint(asset.file, asset.duration);
   const transcript = assetTranscripts[fingerprint] ?? null;
@@ -4621,7 +4982,7 @@ function ClipTranscriptSection({ asset, assetTranscripts, error, onTranscribe, t
       : transcript.text.trim().split(/\s+/).filter(Boolean).length;
   }
   const preview = transcript?.text?.trim() ?? '';
-  const previewClipped = preview.length > 320 ? `${preview.slice(0, 320)}…` : preview;
+  const previewClipped = preview.length > 900 ? `${preview.slice(0, 900)}…` : preview;
 
   return (
     <>
@@ -4656,8 +5017,129 @@ function ClipTranscriptSection({ asset, assetTranscripts, error, onTranscribe, t
         </button>
       </div>
       {error ? <p className="transcript-error">{error}</p> : null}
+      {transcript && clip ? (
+        <SubtitleGenerator clip={clip} onGenerate={onGenerateSubtitles} hasWordTimestamps={transcript.words.length > 0} />
+      ) : null}
     </>
   );
+}
+
+type SubtitleGeneratorProps = {
+  clip: TimelineClip;
+  hasWordTimestamps: boolean;
+  onGenerate: (clip: TimelineClip, mode: SubtitleMode, template: SubtitleTemplateId) => void;
+};
+
+function SubtitleGenerator({ clip, hasWordTimestamps, onGenerate }: SubtitleGeneratorProps) {
+  const [mode, setMode] = useState<SubtitleMode>('sentence');
+  const [templateId, setTemplateId] = useState<SubtitleTemplateId>('clean-lower-third');
+  return (
+    <>
+      <div className="subhead">Subtitles</div>
+      <label className="field">
+        <span>Mode</span>
+        <select onChange={(event) => setMode(event.target.value as SubtitleMode)} value={mode}>
+          <option value="sentence">Sentence (default)</option>
+          <option value="phrase">Short phrase</option>
+          <option value="word" disabled={!hasWordTimestamps}>
+            Word-by-word {hasWordTimestamps ? '' : '(needs word timestamps)'}
+          </option>
+        </select>
+      </label>
+      <SubtitleTemplatePicker value={templateId} onChange={setTemplateId} />
+      <div className="button-grid">
+        <button className="button" onClick={() => onGenerate(clip, mode, templateId)} type="button">
+          Generate Subtitles
+        </button>
+      </div>
+    </>
+  );
+}
+
+type SubtitleTemplatePickerProps = {
+  /** When provided, picking a card just emits onChange (selection mode).
+   *  When null, every card has its own action button (apply mode). */
+  onChange?: (id: SubtitleTemplateId) => void;
+  /** Apply-mode handler. Receives the template id; UI clears selection after. */
+  onApply?: (id: SubtitleTemplateId) => void;
+  /** Currently-selected id (only in selection mode). */
+  value?: SubtitleTemplateId | null;
+};
+
+// Renders every subtitle template as a small visual preview tile: a faux
+// video frame with a real-style caption rendered using the template's CSS.
+// The preview is built from the same style fields the export pipeline reads,
+// so what the user picks here is what they get on the timeline.
+function SubtitleTemplatePicker({ onApply, onChange, value }: SubtitleTemplatePickerProps) {
+  return (
+    <div className="template-picker">
+      {SUBTITLE_TEMPLATES.map((tpl) => {
+        const isSelected = value === tpl.id;
+        const handleClick = () => {
+          if (onChange) onChange(tpl.id);
+          if (onApply) onApply(tpl.id);
+        };
+        const previewStyle = buildTemplatePreviewStyle(tpl.style);
+        return (
+          <button
+            aria-pressed={isSelected}
+            className={`template-card${isSelected ? ' is-selected' : ''}`}
+            key={tpl.id}
+            onClick={handleClick}
+            title={tpl.description}
+            type="button"
+          >
+            <span className="template-card-frame" aria-hidden="true">
+              <span className="template-card-bars" />
+              <span className="template-card-caption" style={previewStyle}>
+                {tpl.style.textCase === 'upper' ? 'CAPTION' : 'Caption'}
+              </span>
+            </span>
+            <span className="template-card-label">{tpl.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Translate a template's style fields into CSS rules for the preview tile.
+// Sizes are downscaled from output-resolution pixels to the tile's scale so
+// the preview reads the same shape proportions as the rendered subtitle.
+function buildTemplatePreviewStyle(style: Partial<TextOverlay>): CSSProperties {
+  const tileWidthPx = 132; // matches .template-card-frame width
+  const projectWidthPx = 1080; // sizing scale reference
+  const scale = tileWidthPx / projectWidthPx;
+  const size = (style.size ?? 54) * scale;
+  const strokeWidth = (style.strokeWidth ?? 0) * scale;
+  const shadowOffsetY = (style.shadowOffsetY ?? 0) * scale;
+  const shadowOffsetX = (style.shadowOffsetX ?? 0) * scale;
+  const shadowBlur = (style.shadowBlur ?? 0) * scale;
+  const fontFamily = style.fontFamily ? getFontStack(style.fontFamily) : undefined;
+  const css: CSSProperties = {
+    color: style.color ?? '#ffffff',
+    fontFamily,
+    fontSize: `${size.toFixed(2)}px`,
+    fontStyle: style.italic ? 'italic' : 'normal',
+    fontWeight: style.bold ? 800 : 500,
+    lineHeight: style.lineHeight ?? 1.2,
+    textTransform: style.textCase === 'upper' ? 'uppercase' : style.textCase === 'lower' ? 'lowercase' : 'none',
+  };
+  if (style.backgroundColor && !style.backgroundColor.endsWith('00')) {
+    css.background = style.backgroundColor;
+    css.padding = '2px 6px';
+    css.borderRadius = '2px';
+  }
+  if (strokeWidth > 0) {
+    (css as CSSProperties & { WebkitTextStrokeWidth?: string; WebkitTextStrokeColor?: string }).WebkitTextStrokeWidth =
+      `${strokeWidth.toFixed(2)}px`;
+    (css as CSSProperties & { WebkitTextStrokeWidth?: string; WebkitTextStrokeColor?: string }).WebkitTextStrokeColor =
+      style.strokeColor ?? '#000000';
+  }
+  if (shadowBlur > 0 || shadowOffsetX !== 0 || shadowOffsetY !== 0) {
+    css.textShadow = `${shadowOffsetX.toFixed(2)}px ${shadowOffsetY.toFixed(2)}px ${shadowBlur.toFixed(2)}px ${style.shadowColor ?? '#000000'}`;
+  }
+  return css;
 }
 
 function Inspector({
@@ -4665,18 +5147,21 @@ function Inspector({
   assetBeats,
   assetTranscripts,
   beatError,
+  bulkTextEdit,
   capabilities,
   deleteAssetFromLibrary,
   deleteSelected,
   detectAssetBeats,
   detectingBeatsFingerprints,
   dispatch,
+  generateSubtitlesForClip,
   hasTimeline,
   project,
   selectedAsset,
   selectedClip,
   selectedClipAsset,
   selectedText,
+  setBulkTextEdit,
   splitAtPlayhead,
   transcribeAsset,
   transcribeError,
@@ -4694,6 +5179,8 @@ function Inspector({
       });
     };
 
+    const totalTextOverlays = project.textOverlays.length;
+    const canBulkEdit = totalTextOverlays > 1;
     return (
       <>
         <div className="panel-header">
@@ -4704,6 +5191,23 @@ function Inspector({
           <Type size={16} />
         </div>
         <div className="control-stack">
+          {canBulkEdit && (
+            <div className={`bulk-edit-row${bulkTextEdit ? ' is-active' : ''}`}>
+              <button
+                className={`chip${bulkTextEdit ? ' is-active' : ''}`}
+                onClick={() => setBulkTextEdit(!bulkTextEdit)}
+                title="Apply style, position and transform changes to every text overlay"
+                type="button"
+              >
+                {bulkTextEdit ? `✓ All Text Selected (${totalTextOverlays})` : `Select All Text (${totalTextOverlays})`}
+              </button>
+              {bulkTextEdit && (
+                <span className="bulk-edit-hint">
+                  Style, transform and position edits apply to all overlays.
+                </span>
+              )}
+            </div>
+          )}
           <div className="meta-grid">
             <span>Duration</span>
             <strong>{formatClock(textDuration)}</strong>
@@ -4878,6 +5382,19 @@ function Inspector({
           <ControlNumber label="Offset X" max={32} min={-32} step={1} value={selectedText.shadowOffsetX} onChange={(value) => dispatch({ patch: { shadowOffsetX: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
           <ControlNumber label="Offset Y" max={32} min={-32} step={1} value={selectedText.shadowOffsetY} onChange={(value) => dispatch({ patch: { shadowOffsetY: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
 
+          <div className="subhead">Subtitle Template</div>
+          <SubtitleTemplatePicker
+            onApply={(id) => {
+              const template = findSubtitleTemplate(id);
+              // Re-apply style only — preserve text + timing + id + track.
+              dispatch({
+                patch: { ...template.style },
+                textId: selectedText.id,
+                type: 'UPDATE_TEXT',
+              });
+            }}
+          />
+
           <div className="subhead">Transform</div>
           <ControlNumber label="X" max={0.98} min={0.02} step={0.01} value={selectedText.x} onChange={(value) => dispatch({ patch: { x: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
           <ControlNumber label="Y" max={0.98} min={0.02} step={0.01} value={selectedText.y} onChange={(value) => dispatch({ patch: { y: value }, textId: selectedText.id, type: 'UPDATE_TEXT' })} />
@@ -4934,20 +5451,27 @@ function Inspector({
           {isAudioClip ? <Music size={16} /> : <Scissors size={16} />}
         </div>
         <div className="control-stack">
-          <div className="meta-grid">
-            <span>Duration</span>
-            <strong>{formatClock(clipDuration)}</strong>
-            <span>Source</span>
-            <strong>{formatClock(selectedClip.sourceIn)} - {formatClock(selectedClip.sourceOut)}</strong>
-            <span>Timeline</span>
-            <strong>{formatClock(selectedClip.timelineStart)}</strong>
+          <div className="clip-summary">
+            <div>
+              <span>Duration</span>
+              <strong>{formatClock(clipDuration)}</strong>
+            </div>
+            <div>
+              <span>Source</span>
+              <strong>{formatClock(selectedClip.sourceIn)} → {formatClock(selectedClip.sourceOut)}</strong>
+            </div>
+            <div>
+              <span>Timeline</span>
+              <strong>{formatClock(selectedClip.timelineStart)}</strong>
+            </div>
           </div>
 
-          <ControlNumber
-            label="Timeline Start"
+          <ScrubNumber
+            label="Position"
             max={getProjectDuration(project) + 60}
             min={0}
             step={0.05}
+            suffix="s"
             value={selectedClip.timelineStart}
             onChange={(value) => dispatch({ clipId: selectedClip.id, timelineStart: value, type: 'MOVE_CLIP' })}
           />
@@ -4965,58 +5489,77 @@ function Inspector({
             </select>
           </label>
 
-          <ControlNumber
-            label="Source In"
-            max={selectedClip.sourceOut - 0.1}
-            min={0}
-            step={0.05}
-            value={selectedClip.sourceIn}
-            onChange={(value) => dispatch({ clipId: selectedClip.id, edge: 'start', sourceTime: value, type: 'TRIM_CLIP' })}
-          />
-          <ControlNumber
-            label="Source Out"
-            max={selectedClipAsset?.duration || selectedClip.sourceOut}
-            min={selectedClip.sourceIn + 0.1}
-            step={0.05}
-            value={selectedClip.sourceOut}
-            onChange={(value) => dispatch({ clipId: selectedClip.id, edge: 'end', sourceTime: value, type: 'TRIM_CLIP' })}
-          />
+          <div className="scrub-row">
+            <ScrubNumber
+              compact
+              label="In"
+              max={selectedClip.sourceOut - 0.1}
+              min={0}
+              step={0.05}
+              suffix="s"
+              value={selectedClip.sourceIn}
+              onChange={(value) => dispatch({ clipId: selectedClip.id, edge: 'start', sourceTime: value, type: 'TRIM_CLIP' })}
+            />
+            <ScrubNumber
+              compact
+              label="Out"
+              max={selectedClipAsset?.duration || selectedClip.sourceOut}
+              min={selectedClip.sourceIn + 0.1}
+              step={0.05}
+              suffix="s"
+              value={selectedClip.sourceOut}
+              onChange={(value) => dispatch({ clipId: selectedClip.id, edge: 'end', sourceTime: value, type: 'TRIM_CLIP' })}
+            />
+          </div>
 
           {isAudioClip ? null : (
-            <>
-              <div className="subhead">Canvas Transform</div>
-              <ControlNumber label="X" max={1} min={0} step={0.01} value={selectedClip.transform.x} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { x: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
-              <ControlNumber label="Y" max={1} min={0} step={0.01} value={selectedClip.transform.y} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { y: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
-              <ControlNumber label="Scale" max={4} min={0.25} step={0.01} value={selectedClip.transform.scale} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { scale: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
-              <ControlNumber label="Rotate" max={180} min={-180} step={1} value={selectedClip.transform.rotation ?? 0} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { rotation: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
-            </>
+            <div className="section">
+              <div className="section-head">Transform</div>
+              <div className="scrub-row">
+                <ScrubNumber compact label="X" max={1} min={0} step={0.01} value={selectedClip.transform.x} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { x: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+                <ScrubNumber compact label="Y" max={1} min={0} step={0.01} value={selectedClip.transform.y} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { y: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+              </div>
+              <div className="scrub-row">
+                <ScrubNumber compact label="Scale" max={4} min={0.25} step={0.01} value={selectedClip.transform.scale} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { scale: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+                <ScrubNumber compact label="Rotate" max={180} min={-180} step={1} suffix="°" value={selectedClip.transform.rotation ?? 0} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { rotation: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+              </div>
+            </div>
           )}
 
-          <label className="toggle-row">
-            <input
-              checked={selectedClip.muted}
-              onChange={(event) => dispatch({ clipId: selectedClip.id, patch: { muted: event.target.checked }, type: 'UPDATE_CLIP_AUDIO' })}
-              type="checkbox"
-            />
-            <span>Mute clip audio</span>
-          </label>
-          <ControlNumber label="Volume" max={2} min={0} step={0.01} value={selectedClip.volume} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { volume: value }, type: 'UPDATE_CLIP_AUDIO' })} />
-          <ControlNumber label="Fade In" max={clipDuration} min={0} step={0.05} value={selectedClip.fadeIn} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { fadeIn: value }, type: 'UPDATE_CLIP_AUDIO' })} />
-          <ControlNumber label="Fade Out" max={clipDuration} min={0} step={0.05} value={selectedClip.fadeOut} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { fadeOut: value }, type: 'UPDATE_CLIP_AUDIO' })} />
+          <div className="section">
+            <div className="section-head section-head-row">
+              <span>Audio</span>
+              <label className="toggle-inline">
+                <input
+                  checked={selectedClip.muted}
+                  onChange={(event) => dispatch({ clipId: selectedClip.id, patch: { muted: event.target.checked }, type: 'UPDATE_CLIP_AUDIO' })}
+                  type="checkbox"
+                />
+                <span>Mute</span>
+              </label>
+            </div>
+            <ScrubNumber label="Volume" max={2} min={0} step={0.01} value={selectedClip.volume} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { volume: value }, type: 'UPDATE_CLIP_AUDIO' })} />
+            <div className="scrub-row">
+              <ScrubNumber compact label="Fade In" max={clipDuration} min={0} step={0.05} suffix="s" value={selectedClip.fadeIn} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { fadeIn: value }, type: 'UPDATE_CLIP_AUDIO' })} />
+              <ScrubNumber compact label="Fade Out" max={clipDuration} min={0} step={0.05} suffix="s" value={selectedClip.fadeOut} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { fadeOut: value }, type: 'UPDATE_CLIP_AUDIO' })} />
+            </div>
+          </div>
 
           {isAudioClip ? null : (
-            <>
-              <div className="subhead">Effects</div>
-              <ControlNumber label="Brightness" max={0.4} min={-0.4} step={0.01} value={selectedClip.effects.brightness} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { brightness: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
-              <ControlNumber label="Contrast" max={1.8} min={0.5} step={0.01} value={selectedClip.effects.contrast} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { contrast: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
-              <ControlNumber label="Saturation" max={2} min={0} step={0.01} value={selectedClip.effects.saturation} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { saturation: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
-            </>
+            <div className="section">
+              <div className="section-head">Effects</div>
+              <ScrubNumber label="Brightness" max={0.4} min={-0.4} step={0.01} value={selectedClip.effects.brightness} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { brightness: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
+              <ScrubNumber label="Contrast" max={1.8} min={0.5} step={0.01} value={selectedClip.effects.contrast} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { contrast: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
+              <ScrubNumber label="Saturation" max={2} min={0} step={0.01} value={selectedClip.effects.saturation} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { saturation: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
+            </div>
           )}
 
           <ClipTranscriptSection
             asset={selectedClipAsset}
             assetTranscripts={assetTranscripts}
+            clip={selectedClip}
             error={transcribeError}
+            onGenerateSubtitles={generateSubtitlesForClip}
             onTranscribe={transcribeAsset}
             transcribingFingerprints={transcribingFingerprints}
           />
@@ -5222,6 +5765,115 @@ function ControlNumber({ label, max, min, onChange, step, value }: ControlNumber
         <input max={max} min={min} onChange={(event) => onChange(Number(event.target.value))} step={step} type="number" value={Number.isFinite(value) ? value : 0} />
       </div>
     </label>
+  );
+}
+
+function stepDecimals(step: number): number {
+  if (step >= 1) return 0;
+  const s = step.toString();
+  const dot = s.indexOf('.');
+  return dot >= 0 ? Math.min(3, s.length - dot - 1) : 0;
+}
+
+function quantizeStep(value: number, step: number): number {
+  if (step <= 0) return value;
+  return Math.round(value / step) * step;
+}
+
+type ScrubNumberProps = {
+  compact?: boolean;
+  label: string;
+  max: number;
+  min: number;
+  onChange: (value: number) => void;
+  step: number;
+  suffix?: string;
+  value: number;
+};
+
+function ScrubNumber({ compact, label, max, min, onChange, step, suffix, value }: ScrubNumberProps) {
+  const safeValue = Number.isFinite(value) ? value : 0;
+  const decimals = stepDecimals(step);
+  const formatted = safeValue.toFixed(decimals);
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(formatted);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!editing) setText(formatted);
+  }, [editing, formatted]);
+
+  const span = Math.max(0.0001, max - min);
+  const thumbPct = Math.min(100, Math.max(0, ((safeValue - min) / span) * 100));
+  const bipolar = min < 0 && max > 0;
+  const zeroPct = bipolar ? Math.min(100, Math.max(0, ((0 - min) / span) * 100)) : 0;
+  // Notch sits at value-0 position when the range crosses zero, otherwise it
+  // anchors at the visual midpoint as a sense-of-scale reference.
+  const notchPct = bipolar ? zeroPct : 50;
+  // Fill: bipolar anchors at zero and extends to the thumb; unipolar fills
+  // from the left edge to the thumb.
+  const fillLeftPct = bipolar ? Math.min(zeroPct, thumbPct) : 0;
+  const fillRightPct = bipolar ? Math.max(zeroPct, thumbPct) : thumbPct;
+  const fillWidthPct = Math.max(0, fillRightPct - fillLeftPct);
+
+  const commit = useCallback(
+    (raw: string) => {
+      const parsed = Number.parseFloat(raw);
+      if (Number.isFinite(parsed)) {
+        const clamped = Math.min(Math.max(parsed, min), max);
+        onChange(quantizeStep(clamped, step));
+      }
+      setEditing(false);
+    },
+    [max, min, onChange, step],
+  );
+
+  return (
+    <div className={`scrub${compact ? ' is-compact' : ''}${bipolar ? ' is-bipolar' : ''}`}>
+      <span className="scrub-label">{label}</span>
+      <div className="scrub-control">
+        <div className="scrub-track-wrap">
+          <div className="scrub-track-base" />
+          <div className="scrub-track-fill" style={{ left: `${fillLeftPct}%`, width: `${fillWidthPct}%` }} />
+          <div className="scrub-track-notch" style={{ left: `${notchPct}%` }} />
+          <input
+            className="scrub-slider"
+            max={max}
+            min={min}
+            onChange={(event) => onChange(Number(event.target.value))}
+            step={step}
+            type="range"
+            value={safeValue}
+          />
+        </div>
+        {editing ? (
+          <input
+            className="scrub-number-input"
+            inputMode="decimal"
+            onBlur={() => commit(text)}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') { event.preventDefault(); commit(text); }
+              else if (event.key === 'Escape') { setText(formatted); setEditing(false); }
+            }}
+            ref={inputRef}
+            type="text"
+            value={text}
+          />
+        ) : (
+          <button
+            className="scrub-number-display"
+            onClick={() => {
+              setEditing(true);
+              requestAnimationFrame(() => { inputRef.current?.focus(); inputRef.current?.select(); });
+            }}
+            type="button"
+          >
+            {formatted}{suffix ? <span className="scrub-suffix">{suffix}</span> : null}
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 

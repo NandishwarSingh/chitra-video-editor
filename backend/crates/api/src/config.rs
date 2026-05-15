@@ -10,6 +10,7 @@ use chitra_chat::ChatConfig;
 use chitra_storage::StorageConfig;
 use chitra_transcode::TranscodeConfig;
 
+use crate::beats::BeatsConfig;
 use crate::transcribe::TranscribeConfig;
 
 pub struct Config {
@@ -19,6 +20,7 @@ pub struct Config {
     pub chat: ChatConfig,
     pub transcode: TranscodeConfig,
     pub transcribe: TranscribeConfig,
+    pub beats: BeatsConfig,
 }
 
 impl Config {
@@ -72,11 +74,18 @@ impl Config {
                 .unwrap_or_else(|_| "https://api.groq.com/openai/v1".to_string()),
             whisper_bin: env::var("CHITRA_WHISPER_BIN").unwrap_or_else(|_| "whisper-cli".to_string()),
             whisper_model: env::var("CHITRA_WHISPER_MODEL").unwrap_or_default(),
-            ffmpeg_path,
+            ffmpeg_path: ffmpeg_path.clone(),
             whisper_threads: env::var("CHITRA_WHISPER_THREADS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(4),
+        };
+
+        let beats = BeatsConfig {
+            provider: env::var("CHITRA_BEAT_PROVIDER").unwrap_or_else(|_| "madmom".to_string()),
+            python_bin: env::var("CHITRA_BEAT_PYTHON").unwrap_or_else(|_| "python3".to_string()),
+            aubio_bin: env::var("CHITRA_BEAT_AUBIO_BIN").unwrap_or_else(|_| "aubio".to_string()),
+            ffmpeg_path: ffmpeg_path.clone(),
         };
 
         Ok(Self {
@@ -86,6 +95,7 @@ impl Config {
             chat,
             transcode,
             transcribe,
+            beats,
         })
     }
 }

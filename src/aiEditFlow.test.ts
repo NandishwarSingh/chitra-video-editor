@@ -226,6 +226,63 @@ describe('AI edit flow (apply_eal pipeline)', () => {
     }
   });
 
+  it('materialises cut markers into adjacent timeline clips', () => {
+    // QA found that DeepSeek emits `["cut", { afterClip, at }]` markers for
+    // beat-sync, expecting the runtime to split. The old executor dropped
+    // them silently — one clip stayed on the timeline. This test pins down
+    // the materialiser: 7 cuts at 1s intervals on an 8s clip → 8 pieces.
+    const source = projectWithOneClip();
+    // Trim the fixture to 8 s for the QA scenario (a 120 BPM, 8 s clip with
+    // 7 cuts at integer second boundaries).
+    source.clips = source.clips.map((c) => ({ ...c, sourceIn: 0, sourceOut: 8 }));
+    const settings = PROJECT_PRESETS.landscape;
+    const program = createEditArrayFromRuntime(source, settings, 'Beat sync via cuts');
+    const cutTimes = [1, 2, 3, 4, 5, 6, 7];
+    const beatCutProgram = [
+      ...program,
+      ...cutTimes.map((t): unknown[] => [
+        'cut',
+        { afterClip: source.clips[0].id, at: `00:00:0${t}.000` },
+      ]),
+    ];
+
+    const plan = compileEditArrayProgram(beatCutProgram);
+    const result = executeEditPlan(plan, source);
+    expect(result.diagnostics.filter((d) => d.severity === 'error')).toEqual([]);
+
+    expect(result.project.clips).toHaveLength(8);
+    const sorted = [...result.project.clips].sort((a, b) => a.timelineStart - b.timelineStart);
+    for (let i = 0; i < sorted.length; i += 1) {
+      expect(sorted[i].timelineStart).toBeCloseTo(i, 3);
+      expect(sorted[i].sourceIn).toBeCloseTo(i, 3);
+      expect(sorted[i].sourceOut).toBeCloseTo(i + 1, 3);
+      expect(getClipDuration(sorted[i])).toBeCloseTo(1, 3);
+      // All pieces reference the same asset — splits are not reorders.
+      expect(sorted[i].assetId).toBe('a-main');
+    }
+    // Original clip id is preserved on the first piece so any in-program
+    // references (audio/effect entries by clip id) still resolve.
+    expect(sorted[0].id).toBe(source.clips[0].id);
+  });
+
+  it('ignores cut markers that land outside their target clip range', () => {
+    const source = projectWithOneClip();
+    source.clips = source.clips.map((c) => ({ ...c, sourceIn: 0, sourceOut: 8 }));
+    const settings = PROJECT_PRESETS.landscape;
+    const program = createEditArrayFromRuntime(source, settings, 'Out of range cuts');
+    // Both at the clip's boundary or beyond — neither should produce a split.
+    const cutProgram = [
+      ...program,
+      ['cut', { afterClip: source.clips[0].id, at: '00:00:00.000' }],
+      ['cut', { afterClip: source.clips[0].id, at: '00:00:08.000' }],
+      ['cut', { afterClip: source.clips[0].id, at: '00:00:42.000' }],
+    ];
+    const plan = compileEditArrayProgram(cutProgram);
+    const result = executeEditPlan(plan, source);
+    expect(result.project.clips).toHaveLength(1);
+    expect(result.project.clips[0].id).toBe(source.clips[0].id);
+  });
+
   it('round-trips an apply_eal as a single APPLY_EAL reducer action (undo-safe)', () => {
     // What App.tsx:applyChatToolCall does end-to-end. After dispatch:
     //   - present matches the executed plan

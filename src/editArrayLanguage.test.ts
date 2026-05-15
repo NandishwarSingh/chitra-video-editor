@@ -181,6 +181,7 @@ describe('Edit Array Language', () => {
     expect(EDIT_ARRAY_FIELD_POLICY.ProjectAsset.omitted).toContain('playbackUrl');
     expect(EDIT_ARRAY_RESERVED_OPCODES).toContain('keyframe');
     expect(EDIT_ARRAY_RESERVED_OPCODES).toContain('subtitle');
+    expect(EDIT_ARRAY_RESERVED_OPCODES).toContain('beat_grid');
     expect(EDIT_ARRAY_SYSTEM_COMPONENTS).toContain('Edit Compiler');
     expect(EDIT_ARRAY_SYSTEM_COMPONENTS).toContain('Edit Repair Loop');
   });

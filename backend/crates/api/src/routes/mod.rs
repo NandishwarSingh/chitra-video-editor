@@ -5,6 +5,7 @@ use tower_http::cors::CorsLayer;
 use crate::state::AppState;
 
 mod assets;
+mod beats;
 mod chat;
 mod health;
 mod jobs;
@@ -35,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/assets", assets::router())
         .nest("/api/jobs", jobs::router())
         .nest("/api/transcribe", transcribe::router())
+        .nest("/api/detect-beats", beats::router())
         .with_state(state)
         // Multipart STT uploads can be GB-scale (raw 4K clip blobs sent
         // directly from IndexedDB). Local dev only sends to localhost so

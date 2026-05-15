@@ -196,6 +196,7 @@ export type ProjectAction =
   | { clipId: string; effects: Partial<EffectSettings>; type: 'UPDATE_CLIP_EFFECTS' }
   | { clipId: string; record?: boolean; transform: Partial<ClipTransform>; type: 'UPDATE_CLIP_TRANSFORM' }
   | { overlay: TextOverlay; type: 'ADD_TEXT' }
+  | { overlays: TextOverlay[]; rangeEnd: number; rangeStart: number; trackId: string; type: 'REPLACE_TEXTS_IN_RANGE' }
   | { textId: string | null; type: 'SELECT_TEXT' }
   | { patch: Partial<TextOverlay>; record?: boolean; textId: string; type: 'UPDATE_TEXT' }
   | { textId: string; type: 'DELETE_TEXT' }
@@ -1353,6 +1354,49 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
         selectedTextId: overlay.id,
         selectedTrackId: overlay.trackId,
         textOverlays: [...project.textOverlays, overlay],
+        tracks,
+      };
+    }
+
+    case 'REPLACE_TEXTS_IN_RANGE': {
+      const projectDuration = Math.max(getProjectDuration(project), MIN_CLIP_DURATION);
+      let tracks = project.tracks;
+      let trackId = action.trackId;
+      const existingTextTrack = tracks.find((track) => track.kind === 'text');
+      if (!trackId || !tracks.some((track) => track.id === trackId)) {
+        if (existingTextTrack) {
+          trackId = existingTextTrack.id;
+        } else {
+          const newTrack: TimelineTrack = {
+            id: DEFAULT_TEXT_TRACK_ID,
+            index: 0,
+            kind: 'text',
+            locked: false,
+            muted: false,
+            name: 'Text 1',
+            visible: true,
+          };
+          tracks = normalizeTimelineTracks([...tracks, newTrack]);
+          trackId = tracks.find((track) => track.kind === 'text')?.id ?? DEFAULT_TEXT_TRACK_ID;
+        }
+      }
+      const rangeStart = Math.min(action.rangeStart, action.rangeEnd);
+      const rangeEnd = Math.max(action.rangeStart, action.rangeEnd);
+      const remaining = project.textOverlays.filter(
+        (overlay) =>
+          overlay.trackId !== trackId ||
+          overlay.end <= rangeStart + 0.001 ||
+          overlay.start >= rangeEnd - 0.001,
+      );
+      const placed = action.overlays
+        .map((overlay) => clampTextOverlay({ ...overlay, trackId }, projectDuration, trackId))
+        .filter((overlay) => overlay.end > overlay.start);
+      return {
+        ...project,
+        selectedClipId: null,
+        selectedTextId: placed[placed.length - 1]?.id ?? project.selectedTextId,
+        selectedTrackId: trackId,
+        textOverlays: [...remaining, ...placed],
         tracks,
       };
     }

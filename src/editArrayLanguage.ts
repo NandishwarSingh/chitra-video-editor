@@ -33,6 +33,12 @@ export const EDIT_ARRAY_RESERVED_OPCODES = [
   'camera',
   'search',
   'generated_asset',
+  // Beat-grid metadata is currently runtime-only (cached in IndexedDB keyed
+  // by asset fingerprint) and pinned into the chat context as `## Beat grids`.
+  // The opcode is reserved so a future change that wants to embed grids in
+  // EAL (e.g. for shareable beat-aligned templates) has a home, and the field
+  // is referenced in EAL_FIELD_POLICY documentation today.
+  'beat_grid',
 ] as const;
 
 export const EDIT_ARRAY_SYSTEM_COMPONENTS = [

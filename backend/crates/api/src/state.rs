@@ -11,6 +11,7 @@ use chitra_transcode::TranscodeWorker;
 use std::sync::Arc;
 use tracing::{info, warn};
 
+use crate::beats::BeatsClient;
 use crate::config::Config;
 use crate::transcribe::TranscribeClient;
 
@@ -24,6 +25,7 @@ struct Inner {
     pub storage: Option<StorageStack>,
     pub transcode: TranscodeWorker,
     pub transcribe: Option<TranscribeClient>,
+    pub beats: BeatsClient,
     pub allowed_origins: Vec<String>,
 }
 
@@ -79,12 +81,20 @@ impl AppState {
             None
         };
 
+        let beats = BeatsClient::new(cfg.beats.clone());
+        if beats.is_enabled() {
+            info!(provider = %cfg.beats.provider, "beat detection ready");
+        } else {
+            warn!(provider = %cfg.beats.provider, "beat provider misconfigured — /api/detect-beats will reject");
+        }
+
         Ok(Self {
             inner: Arc::new(Inner {
                 chat,
                 storage,
                 transcode,
                 transcribe,
+                beats,
                 allowed_origins: cfg.allowed_origins.clone(),
             }),
         })
@@ -104,6 +114,10 @@ impl AppState {
 
     pub fn transcribe(&self) -> Option<&TranscribeClient> {
         self.inner.transcribe.as_ref()
+    }
+
+    pub fn beats(&self) -> &BeatsClient {
+        &self.inner.beats
     }
 
     pub fn allowed_origins(&self) -> &[String] {
