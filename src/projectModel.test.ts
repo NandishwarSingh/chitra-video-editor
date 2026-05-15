@@ -10,9 +10,11 @@ import {
   getNextClipAfter,
   getProjectDuration,
   idleJobStatus,
+  isTextOverlayActiveAt,
   projectReducer,
   snapToTarget,
   type ProjectAsset,
+  type TextOverlay,
 } from './projectModel';
 
 function asset(id: string, duration: number): ProjectAsset {
@@ -482,5 +484,221 @@ describe('project model', () => {
     state = projectReducer(state, { patch: { visible: false }, trackId: 'text-1', type: 'UPDATE_TRACK' });
 
     expect(getActiveTextOverlays(state.present, 1)).toEqual([]);
+  });
+});
+
+describe('active text overlay boundary (half-open)', () => {
+  const overlay = (id: string, start: number, end: number): TextOverlay => ({
+    ...DEFAULT_TEXT_OVERLAY,
+    end,
+    id,
+    start,
+    text: id,
+    trackId: 'text-1',
+  });
+
+  it('renders a cue when playhead is at start', () => {
+    expect(isTextOverlayActiveAt(overlay('a', 1, 2), 1)).toBe(true);
+  });
+
+  it('renders a cue strictly before end', () => {
+    expect(isTextOverlayActiveAt(overlay('a', 1, 2), 1.999)).toBe(true);
+  });
+
+  it('does NOT render a cue when playhead is exactly at end', () => {
+    expect(isTextOverlayActiveAt(overlay('a', 1, 2), 2)).toBe(false);
+  });
+
+  it('does not render before start', () => {
+    expect(isTextOverlayActiveAt(overlay('a', 1, 2), 0.999)).toBe(false);
+  });
+
+  it('two adjacent cues sharing a boundary never both render', () => {
+    const a = overlay('a', 0, 2);
+    const b = overlay('b', 2, 4);
+    for (const t of [1.999, 2.0, 2.001]) {
+      const both = isTextOverlayActiveAt(a, t) && isTextOverlayActiveAt(b, t);
+      expect(both).toBe(false);
+    }
+    expect(isTextOverlayActiveAt(a, 1.999)).toBe(true);
+    expect(isTextOverlayActiveAt(b, 2)).toBe(true);
+  });
+
+  it('keeps the final cue visible when playhead reaches timeline end', () => {
+    const last = overlay('last', 8, 10);
+    expect(isTextOverlayActiveAt(last, 10)).toBe(false);
+    // With timelineEnd provided and matching the cue end, the cue stays on.
+    expect(isTextOverlayActiveAt(last, 10, 10)).toBe(true);
+  });
+
+  it('does not keep a cue visible just because timelineEnd is supplied', () => {
+    const mid = overlay('mid', 4, 6);
+    // The cue ends well before the timeline end; half-open still wins.
+    expect(isTextOverlayActiveAt(mid, 6, 10)).toBe(false);
+  });
+});
+
+describe('REPLACE_TEXTS_IN_RANGE preserves non-overlapping cues', () => {
+  it('does not append duplicates when re-running on the same range', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 60)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+
+    const cuesA = [
+      { ...DEFAULT_TEXT_OVERLAY, end: 2, id: 'c-1', start: 0, text: 'one', trackId: 'text-1' },
+      { ...DEFAULT_TEXT_OVERLAY, end: 4, id: 'c-2', start: 2, text: 'two', trackId: 'text-1' },
+    ];
+    state = projectReducer(state, {
+      overlays: cuesA,
+      rangeEnd: 5,
+      rangeStart: 0,
+      trackId: 'text-1',
+      type: 'REPLACE_TEXTS_IN_RANGE',
+    });
+    expect(state.present.textOverlays).toHaveLength(2);
+
+    // Re-run with a different set — must REPLACE, not append.
+    const cuesB = [
+      { ...DEFAULT_TEXT_OVERLAY, end: 1, id: 'd-1', start: 0, text: 'one-b', trackId: 'text-1' },
+      { ...DEFAULT_TEXT_OVERLAY, end: 3, id: 'd-2', start: 1, text: 'two-b', trackId: 'text-1' },
+      { ...DEFAULT_TEXT_OVERLAY, end: 5, id: 'd-3', start: 3, text: 'three-b', trackId: 'text-1' },
+    ];
+    state = projectReducer(state, {
+      overlays: cuesB,
+      rangeEnd: 5,
+      rangeStart: 0,
+      trackId: 'text-1',
+      type: 'REPLACE_TEXTS_IN_RANGE',
+    });
+
+    const ids = state.present.textOverlays.map((o) => o.id).sort();
+    expect(ids).toEqual(['d-1', 'd-2', 'd-3']);
+    // c-1, c-2 are gone; new cues placed at exact computed times.
+    expect(state.present.textOverlays.find((o) => o.id === 'd-1')!.start).toBe(0);
+    expect(state.present.textOverlays.find((o) => o.id === 'd-2')!.start).toBe(1);
+    expect(state.present.textOverlays.find((o) => o.id === 'd-3')!.start).toBe(3);
+  });
+});
+
+describe('SHIFT_TEXTS_BY', () => {
+  it('shifts every selected overlay by the same delta', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 60)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, {
+      overlays: [
+        { ...DEFAULT_TEXT_OVERLAY, end: 4, id: 't-1', start: 2, text: 'one', trackId: 'text-1' },
+        { ...DEFAULT_TEXT_OVERLAY, end: 8, id: 't-2', start: 6, text: 'two', trackId: 'text-1' },
+      ],
+      rangeEnd: 10,
+      rangeStart: 0,
+      trackId: 'text-1',
+      type: 'REPLACE_TEXTS_IN_RANGE',
+    });
+
+    state = projectReducer(state, { delta: 1.5, textIds: ['t-1', 't-2'], type: 'SHIFT_TEXTS_BY' });
+    const t1 = state.present.textOverlays.find((o) => o.id === 't-1')!;
+    const t2 = state.present.textOverlays.find((o) => o.id === 't-2')!;
+    expect(t1.start).toBeCloseTo(3.5, 5);
+    expect(t1.end).toBeCloseTo(5.5, 5);
+    expect(t2.start).toBeCloseTo(7.5, 5);
+    expect(t2.end).toBeCloseTo(9.5, 5);
+  });
+
+  it('clamps the group so no cue goes negative on a left shift', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 60)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, {
+      overlays: [
+        { ...DEFAULT_TEXT_OVERLAY, end: 2, id: 't-1', start: 1, text: 'a', trackId: 'text-1' },
+        { ...DEFAULT_TEXT_OVERLAY, end: 8, id: 't-2', start: 6, text: 'b', trackId: 'text-1' },
+      ],
+      rangeEnd: 10,
+      rangeStart: 0,
+      trackId: 'text-1',
+      type: 'REPLACE_TEXTS_IN_RANGE',
+    });
+
+    // Asked for -5s; the smallest start is 1, so the whole group shifts by -1.
+    state = projectReducer(state, { delta: -5, textIds: ['t-1', 't-2'], type: 'SHIFT_TEXTS_BY' });
+    const t1 = state.present.textOverlays.find((o) => o.id === 't-1')!;
+    const t2 = state.present.textOverlays.find((o) => o.id === 't-2')!;
+    expect(t1.start).toBeCloseTo(0, 5);
+    expect(t1.end).toBeCloseTo(1, 5);
+    expect(t2.start).toBeCloseTo(5, 5);
+    expect(t2.end).toBeCloseTo(7, 5);
+  });
+
+  it('only shifts overlays in the targeted list', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 60)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, {
+      overlays: [
+        { ...DEFAULT_TEXT_OVERLAY, end: 2, id: 't-1', start: 1, text: 'a', trackId: 'text-1' },
+        { ...DEFAULT_TEXT_OVERLAY, end: 8, id: 't-2', start: 6, text: 'b', trackId: 'text-1' },
+      ],
+      rangeEnd: 10,
+      rangeStart: 0,
+      trackId: 'text-1',
+      type: 'REPLACE_TEXTS_IN_RANGE',
+    });
+
+    state = projectReducer(state, { delta: 2, textIds: ['t-2'], type: 'SHIFT_TEXTS_BY' });
+    const t1 = state.present.textOverlays.find((o) => o.id === 't-1')!;
+    const t2 = state.present.textOverlays.find((o) => o.id === 't-2')!;
+    expect(t1.start).toBeCloseTo(1, 5);
+    expect(t2.start).toBeCloseTo(8, 5);
+  });
+
+  it('broadcasting a style patch applies it to every overlay', () => {
+    // The "Select All Text" UI dispatches one UPDATE_TEXT per overlay. This
+    // test exercises the reducer side of that fan-out — every overlay should
+    // pick up the new style without any timing or trackId being touched.
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 60)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, {
+      overlays: [
+        { ...DEFAULT_TEXT_OVERLAY, color: '#ffffffff', end: 2, id: 't-1', start: 0, text: 'one', trackId: 'text-1' },
+        { ...DEFAULT_TEXT_OVERLAY, color: '#ffffffff', end: 5, id: 't-2', start: 3, text: 'two', trackId: 'text-1' },
+        { ...DEFAULT_TEXT_OVERLAY, color: '#ffffffff', end: 8, id: 't-3', start: 6, text: 'three', trackId: 'text-1' },
+      ],
+      rangeEnd: 10,
+      rangeStart: 0,
+      trackId: 'text-1',
+      type: 'REPLACE_TEXTS_IN_RANGE',
+    });
+
+    const ids = ['t-1', 't-2', 't-3'];
+    for (const id of ids) {
+      state = projectReducer(state, { patch: { color: '#ff8800ff', size: 96 }, textId: id, type: 'UPDATE_TEXT' });
+    }
+    for (const id of ids) {
+      const o = state.present.textOverlays.find((x) => x.id === id)!;
+      expect(o.color).toBe('#ff8800ff');
+      expect(o.size).toBe(96);
+    }
+    // Timing unchanged.
+    expect(state.present.textOverlays.find((o) => o.id === 't-1')!.start).toBe(0);
+    expect(state.present.textOverlays.find((o) => o.id === 't-2')!.start).toBe(3);
+    expect(state.present.textOverlays.find((o) => o.id === 't-3')!.start).toBe(6);
+  });
+
+  it('is a no-op when delta is 0 or textIds is empty', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 60)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    state = projectReducer(state, {
+      overlays: [{ ...DEFAULT_TEXT_OVERLAY, end: 2, id: 't-1', start: 1, text: 'a', trackId: 'text-1' }],
+      rangeEnd: 5,
+      rangeStart: 0,
+      trackId: 'text-1',
+      type: 'REPLACE_TEXTS_IN_RANGE',
+    });
+    const before = state.present.textOverlays;
+    expect(projectReducer(state, { delta: 0, textIds: ['t-1'], type: 'SHIFT_TEXTS_BY' }).present.textOverlays).toBe(before);
+    expect(projectReducer(state, { delta: 1, textIds: [], type: 'SHIFT_TEXTS_BY' }).present.textOverlays).toBe(before);
   });
 });

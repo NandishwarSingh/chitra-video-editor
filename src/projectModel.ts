@@ -197,6 +197,7 @@ export type ProjectAction =
   | { clipId: string; record?: boolean; transform: Partial<ClipTransform>; type: 'UPDATE_CLIP_TRANSFORM' }
   | { overlay: TextOverlay; type: 'ADD_TEXT' }
   | { overlays: TextOverlay[]; rangeEnd: number; rangeStart: number; trackId: string; type: 'REPLACE_TEXTS_IN_RANGE' }
+  | { delta: number; textIds: string[]; type: 'SHIFT_TEXTS_BY' }
   | { textId: string | null; type: 'SELECT_TEXT' }
   | { patch: Partial<TextOverlay>; record?: boolean; textId: string; type: 'UPDATE_TEXT' }
   | { textId: string; type: 'DELETE_TEXT' }
@@ -567,7 +568,20 @@ export function getAudioClipsAtTimeFromIndex(index: TimelineIndex, tracks: Timel
   return getClipsAtTimeFromIndex(index, tracks, time).filter((entry) => entry.track?.kind === 'audio');
 }
 
-export function getActiveTextOverlaysFromIndex(index: TimelineIndex, textOverlays: TextOverlay[], playhead: number): TextOverlay[] {
+/** Half-open membership: a cue is active when playhead ∈ [start, end). Two
+ *  adjacent cues sharing a boundary (e.g. one ends at 4.2, the next starts at
+ *  4.2) therefore never both render at the same frame. The single exception is
+ *  the very end of the timeline — if the playhead has reached `timelineEnd`,
+ *  a cue ending exactly there still renders so the last subtitle doesn't blink
+ *  out the moment the user scrubs all the way right. */
+export function isTextOverlayActiveAt(overlay: TextOverlay, playhead: number, timelineEnd?: number): boolean {
+  if (playhead < overlay.start) return false;
+  if (playhead < overlay.end) return true;
+  if (timelineEnd !== undefined && playhead >= timelineEnd && overlay.end >= timelineEnd) return true;
+  return false;
+}
+
+export function getActiveTextOverlaysFromIndex(index: TimelineIndex, textOverlays: TextOverlay[], playhead: number, timelineEnd?: number): TextOverlay[] {
   if (textOverlays.length === 0) return [];
   // Text overlays can overlap and aren't guaranteed disjoint; binary search
   // only gives O(log n) when there's no overlap. With small N (text overlay
@@ -578,13 +592,13 @@ export function getActiveTextOverlaysFromIndex(index: TimelineIndex, textOverlay
     if (!bucket) continue;
     for (const overlay of bucket) {
       if (overlay.start > playhead) break;
-      if (playhead <= overlay.end) result.push(overlay);
+      if (isTextOverlayActiveAt(overlay, playhead, timelineEnd)) result.push(overlay);
     }
   }
   // Legacy overlays without a trackId still need to render until explicitly hidden.
   for (const overlay of textOverlays) {
     if (overlay.trackId) continue;
-    if (playhead >= overlay.start && playhead <= overlay.end) result.push(overlay);
+    if (isTextOverlayActiveAt(overlay, playhead, timelineEnd)) result.push(overlay);
   }
   return result;
 }
@@ -614,7 +628,7 @@ export function getSelectedText(project: ProjectPresent) {
     : null;
 }
 
-export function getActiveTextOverlays(project: ProjectPresent, playhead: number) {
+export function getActiveTextOverlays(project: ProjectPresent, playhead: number, timelineEnd?: number) {
   const visibleTextTrackIds = new Set(
     project.tracks.filter((track) => track.kind === 'text' && track.visible).map((track) => track.id),
   );
@@ -627,7 +641,7 @@ export function getActiveTextOverlays(project: ProjectPresent, playhead: number)
         return false;
       }
     }
-    return playhead >= overlay.start && playhead <= overlay.end;
+    return isTextOverlayActiveAt(overlay, playhead, timelineEnd);
   });
 }
 
@@ -1398,6 +1412,37 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
         selectedTrackId: trackId,
         textOverlays: [...remaining, ...placed],
         tracks,
+      };
+    }
+
+    case 'SHIFT_TEXTS_BY': {
+      if (action.textIds.length === 0 || !Number.isFinite(action.delta) || action.delta === 0) {
+        return project;
+      }
+      const projectDuration = Math.max(getProjectDuration(project), MIN_CLIP_DURATION);
+      const targetSet = new Set(action.textIds);
+      // Pin the group: if the requested delta would push any target below 0
+      // (left-shift past the start of the timeline) we clamp the WHOLE group
+      // by the same amount so relative spacing between cues is preserved.
+      let effectiveDelta = action.delta;
+      if (action.delta < 0) {
+        for (const overlay of project.textOverlays) {
+          if (!targetSet.has(overlay.id)) continue;
+          if (overlay.start + effectiveDelta < 0) {
+            effectiveDelta = -overlay.start;
+          }
+        }
+      }
+      if (effectiveDelta === 0) return project;
+      return {
+        ...project,
+        textOverlays: project.textOverlays.map((overlay) => {
+          if (!targetSet.has(overlay.id)) return overlay;
+          const duration = Math.max(MIN_CLIP_DURATION, overlay.end - overlay.start);
+          const newStart = Math.min(Math.max(0, overlay.start + effectiveDelta), projectDuration - MIN_CLIP_DURATION);
+          const newEnd = Math.min(projectDuration, newStart + duration);
+          return { ...overlay, end: newEnd, start: newStart };
+        }),
       };
     }
 

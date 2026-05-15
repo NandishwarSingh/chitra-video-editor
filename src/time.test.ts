@@ -18,3 +18,27 @@ describe('time utilities', () => {
     expect(formatBytes(1536)).toBe('1.5 KB');
   });
 });
+
+describe('formatClock rounding', () => {
+  it('rounds binary-float drift up to the next centisecond instead of truncating', () => {
+    // Bug: Math.floor((1.7999999999 % 1) * 100) returned 79 instead of 80.
+    expect(formatClock(1.7999999999)).toBe('00:01.80');
+    expect(formatClock(0.4999999999)).toBe('00:00.50');
+    expect(formatClock(2.999999)).toBe('00:03.00');
+  });
+
+  it('carries rounded centiseconds into the seconds field', () => {
+    expect(formatClock(59.999)).toBe('01:00.00');
+    expect(formatClock(59.9999)).toBe('01:00.00');
+  });
+
+  it('carries rounded seconds into the minutes field', () => {
+    expect(formatClock(3599.999)).toBe('60:00.00');
+  });
+
+  it('handles invalid input', () => {
+    expect(formatClock(Number.NaN)).toBe('00:00.00');
+    expect(formatClock(Number.POSITIVE_INFINITY)).toBe('00:00.00');
+    expect(formatClock(-1)).toBe('00:00.00');
+  });
+});

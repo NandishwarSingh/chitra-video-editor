@@ -7,9 +7,15 @@ export function formatClock(totalSeconds: number) {
     return '00:00.00';
   }
 
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = Math.floor(totalSeconds % 60);
-  const centiseconds = Math.floor((totalSeconds % 1) * 100);
+  // Round to the nearest centisecond first, then carry into seconds/minutes.
+  // Working in pure-integer "totalCentiseconds" space avoids the binary float
+  // drift that made `1.7999999999` truncate to `1.79` instead of rounding
+  // up to `1.80`.
+  let totalCentis = Math.round(totalSeconds * 100);
+  const centiseconds = totalCentis % 100;
+  totalCentis = (totalCentis - centiseconds) / 100;
+  const seconds = totalCentis % 60;
+  const minutes = (totalCentis - seconds) / 60;
 
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(
     centiseconds,

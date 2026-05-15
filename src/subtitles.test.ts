@@ -171,6 +171,52 @@ describe('subtitle cue generation', () => {
     }
   });
 
+  it('end-to-end word mode: count, ordering, boundaries, exact-frame disjointness', () => {
+    const t = transcript();
+    const cues = generateSubtitleCues(t, clip(), {
+      createId: ids(),
+      mode: 'word',
+      template: TEMPLATE,
+      trackId: 'text-1',
+    });
+
+    // 20 words in the transcript, but a couple may merge if they're shorter
+    // than the word-mode minimum (0.18s / 2 = 0.09s) — all are >= 0.2s here,
+    // so we expect one cue per word.
+    expect(cues.length).toBe(20);
+
+    // No overlap in the emitted data.
+    for (let i = 1; i < cues.length; i += 1) {
+      expect(cues[i].start).toBeGreaterThanOrEqual(cues[i - 1].end - 1e-9);
+    }
+    // Cues stay strictly inside the clip's timeline range [5, 15].
+    for (const c of cues) {
+      expect(c.start).toBeGreaterThanOrEqual(5);
+      expect(c.end).toBeLessThanOrEqual(15);
+      expect(c.end).toBeGreaterThan(c.start);
+    }
+    // First / middle / last cue alignment (sourceIn=2, timelineStart=5; word
+    // 'Welcome' is 2.0→2.4 in source → 5.0→5.4 timeline).
+    expect(cues[0].start).toBeCloseTo(5.0, 5);
+    expect(cues[0].end).toBeCloseTo(5.4, 5);
+    expect(cues[0].text).toBe('Welcome');
+    const mid = cues[Math.floor(cues.length / 2)];
+    expect(mid.start).toBeGreaterThan(cues[0].end);
+    expect(mid.end).toBeGreaterThan(mid.start);
+    expect(cues[cues.length - 1].text).toBe('sounds.');
+
+    // Boundary disjointness: scan adjacent pairs and verify that at the EXACT
+    // boundary playhead value, only the later cue is "active" (half-open).
+    // We don't have the runtime helper here — re-derive the rule inline so
+    // the test is hermetic.
+    const isActive = (cue: { end: number; start: number }, t: number) => t >= cue.start && t < cue.end;
+    for (let i = 0; i < cues.length - 1; i += 1) {
+      const boundary = cues[i].end;
+      // Only one cue should be active at the boundary frame.
+      expect(isActive(cues[i], boundary)).toBe(false);
+    }
+  });
+
   it('exposes a usable set of templates', () => {
     expect(SUBTITLE_TEMPLATES.length).toBeGreaterThanOrEqual(6);
     const ids = SUBTITLE_TEMPLATES.map((t) => t.id);

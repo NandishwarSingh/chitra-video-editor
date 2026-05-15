@@ -1051,6 +1051,7 @@ function EditorWorkspace({
   const showPerfHud = useMemo(() => new URLSearchParams(window.location.search).has('perf'), []);
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [rightPanelTab, setRightPanelTab] = useState<'chat' | 'inspector'>('inspector');
+  const [isMobilePanelOpen, setIsMobilePanelOpen] = useState(false);
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [beatMarkersVisible, setBeatMarkersVisible] = useState(true);
   const [bulkTextEdit, setBulkTextEdit] = useState(false);
@@ -1082,8 +1083,8 @@ function EditorWorkspace({
     [present.tracks, timelineIndex, playhead],
   );
   const activeTextOverlays = useMemo(
-    () => getActiveTextOverlaysFromIndex(timelineIndex, present.textOverlays, playhead),
-    [present.textOverlays, timelineIndex, playhead],
+    () => getActiveTextOverlaysFromIndex(timelineIndex, present.textOverlays, playhead, duration),
+    [present.textOverlays, timelineIndex, playhead, duration],
   );
   const activeTimeline = useMemo(
     () =>
@@ -3979,7 +3980,33 @@ function EditorWorkspace({
           </div>
         </section>
 
-        <aside className="panel right-panel">
+        <button
+          aria-label="Open inspector & chat"
+          className="right-panel-mobile-trigger"
+          onClick={() => setIsMobilePanelOpen(true)}
+          title="Inspector & Chat"
+          type="button"
+        >
+          <Type size={16} />
+          <span>Inspector / Chat</span>
+        </button>
+        {isMobilePanelOpen && (
+          <div
+            aria-hidden="true"
+            className="right-panel-mobile-backdrop"
+            onClick={() => setIsMobilePanelOpen(false)}
+          />
+        )}
+        <aside className={`panel right-panel${isMobilePanelOpen ? ' is-open-mobile' : ''}`}>
+          <button
+            aria-label="Close inspector & chat"
+            className="right-panel-mobile-close"
+            onClick={() => setIsMobilePanelOpen(false)}
+            title="Close"
+            type="button"
+          >
+            ×
+          </button>
           <div className="right-panel-tabs" role="tablist">
             <button
               aria-selected={rightPanelTab === 'inspector'}
@@ -4351,7 +4378,7 @@ function EditorWorkspace({
                       type="button"
                     >
                       <strong>{track.name}</strong>
-                      <span>{trackOverlays.length} overlays</span>
+                      <span>{allOverlays.length} overlays</span>
                     </button>
                     <button
                       aria-label={`Delete ${track.name}`}
@@ -4368,29 +4395,40 @@ function EditorWorkspace({
                     </button>
                   </div>
                   {trackOverlays.map((overlay) => {
-                    const overlayDuration = Math.max(0.1, overlay.end - overlay.start);
+                    const overlayDuration = Math.max(0.05, overlay.end - overlay.start);
                     const left = TIMELINE_LABEL_WIDTH + overlay.start * timelinePixelsPerSecond;
-                    const width = Math.max(70, overlayDuration * timelinePixelsPerSecond);
+                    // Word-mode cues can be ~100 ms long; clamping every
+                    // cue to ≥70 px stacks them visually and makes the row
+                    // unreadable. Use the real duration with a small hit-
+                    // target floor (10 px) so they remain clickable.
+                    const realWidth = overlayDuration * timelinePixelsPerSecond;
+                    const width = Math.max(10, realWidth);
+                    const isDense = realWidth < 60;
 
                     return (
                       <button
-                        className={`timeline-clip timeline-clip-text${overlay.id === present.selectedTextId || bulkTextEdit ? ' is-selected' : ''}${bulkTextEdit ? ' is-bulk-selected' : ''}`}
+                        className={`timeline-clip timeline-clip-text${isDense ? ' is-dense' : ''}${overlay.id === present.selectedTextId || bulkTextEdit ? ' is-selected' : ''}${bulkTextEdit ? ' is-bulk-selected' : ''}`}
                         key={overlay.id}
                         onPointerDown={(event) => onTimelineTextPointerDown(event, overlay)}
                         style={{ left: `${left}px`, width: `${width}px` }}
+                        title={`${overlay.text || 'Text'} — ${formatClock(overlay.start)} → ${formatClock(overlay.end)}`}
                         type="button"
                       >
-                        <span className="trim-handle left" onPointerDown={(event) => onTextTrimPointerDown(event, overlay.id, 'start')} />
-                        <span className="text-clip-glyph">
-                          <Type size={14} />
-                        </span>
+                        {!isDense && <span className="trim-handle left" onPointerDown={(event) => onTextTrimPointerDown(event, overlay.id, 'start')} />}
+                        {!isDense && (
+                          <span className="text-clip-glyph">
+                            <Type size={14} />
+                          </span>
+                        )}
                         <span className="clip-label">
                           <strong>{overlay.text || 'Text'}</strong>
-                          <small>
-                            {formatClock(overlay.start)} - {formatClock(overlay.end)}
-                          </small>
+                          {!isDense && (
+                            <small>
+                              {formatClock(overlay.start)} - {formatClock(overlay.end)}
+                            </small>
+                          )}
                         </span>
-                        <span className="trim-handle right" onPointerDown={(event) => onTextTrimPointerDown(event, overlay.id, 'end')} />
+                        {!isDense && <span className="trim-handle right" onPointerDown={(event) => onTextTrimPointerDown(event, overlay.id, 'end')} />}
                       </button>
                     );
                   })}
@@ -5196,15 +5234,34 @@ function Inspector({
               <button
                 className={`chip${bulkTextEdit ? ' is-active' : ''}`}
                 onClick={() => setBulkTextEdit(!bulkTextEdit)}
-                title="Apply style, position and transform changes to every text overlay"
+                title="Apply style, visual position and transform changes to every text overlay"
                 type="button"
               >
                 {bulkTextEdit ? `✓ All Text Selected (${totalTextOverlays})` : `Select All Text (${totalTextOverlays})`}
               </button>
               {bulkTextEdit && (
-                <span className="bulk-edit-hint">
-                  Style, transform and position edits apply to all overlays.
-                </span>
+                <>
+                  <span className="bulk-edit-hint">
+                    Style, visual position and transform edits broadcast to all overlays. Timing edits stay per-overlay — use the buttons below to shift all subtitles together.
+                  </span>
+                  <div className="bulk-shift-row">
+                    <span className="bulk-shift-label">Shift all</span>
+                    {[-1, -0.1, 0.1, 1].map((delta) => (
+                      <button
+                        className="chip bulk-shift-chip"
+                        key={delta}
+                        onClick={() => dispatch({
+                          delta,
+                          textIds: project.textOverlays.map((o) => o.id),
+                          type: 'SHIFT_TEXTS_BY',
+                        })}
+                        type="button"
+                      >
+                        {delta > 0 ? `+${delta}s` : `${delta}s`}
+                      </button>
+                    ))}
+                  </div>
+                </>
               )}
             </div>
           )}
