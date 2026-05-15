@@ -222,11 +222,17 @@ impl TranscribeClient {
 
         let real_duration = probe_duration_seconds(&self.cfg.ffmpeg_path, &input_path).await.ok();
 
+        // Write the runner's JSON to a known file rather than piping it
+        // through stdout — torch.hub and pyannote spray progress bars and
+        // INFO logs into stdout/stderr unpredictably, so a stdout pipe is
+        // not safe.
+        let out_json_path = workdir.path().join("whisperx.json");
         let mut cmd = Command::new(&self.cfg.whisperx_python);
         cmd.args([
             &self.cfg.whisperx_runner,
             wav_path.to_str().ok_or_else(|| TranscribeError::Local("non-utf8 wav path".into()))?,
             &self.cfg.whisperx_model,
+            out_json_path.to_str().ok_or_else(|| TranscribeError::Local("non-utf8 out json path".into()))?,
         ]);
         if let Some(lang) = language_hint {
             cmd.arg(lang);
@@ -234,7 +240,7 @@ impl TranscribeClient {
         debug!(?cmd, "spawning whisperx runner");
 
         let output = cmd
-            .stdout(Stdio::piped())
+            .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output()
             .await
@@ -245,8 +251,9 @@ impl TranscribeClient {
             return Err(TranscribeError::Local(format!("whisperx_runner failed: {}", stderr.trim())));
         }
 
-        let raw = String::from_utf8(output.stdout)
-            .map_err(|e| TranscribeError::Local(format!("whisperx_runner emitted non-utf8: {e}")))?;
+        let raw = tokio::fs::read_to_string(&out_json_path).await.map_err(|e| {
+            TranscribeError::Local(format!("whisperx output {} unreadable: {e}", out_json_path.display()))
+        })?;
         let parsed: WhisperCppOutput = serde_json::from_str(&raw)?;
 
         // Reuse the same post-processing as the whisper_cpp path — the

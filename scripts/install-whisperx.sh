@@ -16,17 +16,34 @@ set -euo pipefail
 
 VENV_PATH="${1:-$HOME/.chitra-whisperx}"
 
-if ! command -v python3 >/dev/null 2>&1; then
-  echo "error: python3 not on PATH. Install Python 3.10+ first."
+# whisperx pins ctranslate2==4.4.0 which only ships wheels for Python
+# 3.10–3.13. Prefer a 3.12 binary if available so we avoid building
+# ctranslate2 from source on 3.14+ (which doesn't even have a wheel).
+PYTHON_BIN="${CHITRA_WHISPERX_PYTHON_BIN:-}"
+if [ -z "$PYTHON_BIN" ]; then
+  for candidate in python3.12 python3.11 python3.10 python3.13 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      ver=$("$candidate" -c 'import sys; print("%d%02d" % sys.version_info[:2])')
+      if [ "$ver" -ge 310 ] && [ "$ver" -le 313 ]; then
+        PYTHON_BIN=$(command -v "$candidate")
+        break
+      fi
+    fi
+  done
+fi
+
+if [ -z "$PYTHON_BIN" ]; then
+  echo "error: no compatible Python found. WhisperX needs Python 3.10-3.13."
+  echo "       Install with:  brew install python@3.12"
   exit 1
 fi
 
-PY_VERSION=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
-echo "Using Python $PY_VERSION"
+PY_VERSION=$("$PYTHON_BIN" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+echo "Using $PYTHON_BIN (Python $PY_VERSION)"
 
 if [ ! -d "$VENV_PATH" ]; then
   echo "Creating venv at $VENV_PATH ..."
-  python3 -m venv "$VENV_PATH"
+  "$PYTHON_BIN" -m venv "$VENV_PATH"
 fi
 
 "$VENV_PATH/bin/pip" install --upgrade pip --quiet

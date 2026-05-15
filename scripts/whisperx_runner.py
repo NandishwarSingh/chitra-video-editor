@@ -2,11 +2,15 @@
 """WhisperX wrapper used by the chitra backend's whisperx provider.
 
 Invoked as:
-    python3 whisperx_runner.py <wav_path> <model_size> [<language_hint>]
+    python3 whisperx_runner.py <wav_path> <model_size> <out_json> [<language>]
 
-Emits a JSON document on stdout in the same shape the Rust parser expects
-from whisper.cpp's -ojf output, so downstream code only sees one transcript
-format:
+WhisperX and its deps (torch.hub, faster-whisper, pyannote) write log
+lines and progress bars to stdout/stderr. Writing JSON to a designated
+output FILE — instead of stdout — keeps the JSON pristine regardless of
+how chatty those libraries get.
+
+The on-disk JSON matches whisper.cpp's -ojf shape so the Rust parser is
+unchanged:
 
     {
       "transcription": [
@@ -136,16 +140,18 @@ def transcribe(wav_path: str, model_size: str, language_hint: str | None) -> dic
 
 
 def main() -> int:
-    if len(sys.argv) < 3:
-        print("usage: whisperx_runner.py <wav> <model> [<lang>]", file=sys.stderr)
+    if len(sys.argv) < 4:
+        print("usage: whisperx_runner.py <wav> <model> <out_json> [<lang>]", file=sys.stderr)
         return 2
 
     wav_path = sys.argv[1]
     model_size = sys.argv[2]
-    language = sys.argv[3] if len(sys.argv) >= 4 and sys.argv[3] not in ("", "auto") else None
+    out_path = sys.argv[3]
+    language = sys.argv[4] if len(sys.argv) >= 5 and sys.argv[4] not in ("", "auto") else None
 
     out = transcribe(wav_path, model_size, language)
-    json.dump(out, sys.stdout, ensure_ascii=False)
+    with open(out_path, "w", encoding="utf-8") as fh:
+        json.dump(out, fh, ensure_ascii=False)
     return 0
 
 
