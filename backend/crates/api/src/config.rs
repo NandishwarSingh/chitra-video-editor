@@ -74,6 +74,10 @@ impl Config {
                 .unwrap_or_else(|_| "https://api.groq.com/openai/v1".to_string()),
             whisper_bin: env::var("CHITRA_WHISPER_BIN").unwrap_or_else(|_| "whisper-cli".to_string()),
             whisper_model: env::var("CHITRA_WHISPER_MODEL").unwrap_or_default(),
+            whisper_vad_model: env::var("CHITRA_WHISPER_VAD_MODEL").unwrap_or_default(),
+            whisperx_python: env::var("CHITRA_WHISPERX_PYTHON").unwrap_or_default(),
+            whisperx_model: env::var("CHITRA_WHISPERX_MODEL").unwrap_or_else(|_| "large-v3-turbo".to_string()),
+            whisperx_runner: env::var("CHITRA_WHISPERX_RUNNER").unwrap_or_default(),
             ffmpeg_path: ffmpeg_path.clone(),
             whisper_threads: env::var("CHITRA_WHISPER_THREADS")
                 .ok()
