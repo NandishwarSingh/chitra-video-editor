@@ -5466,16 +5466,6 @@ function Inspector({
             </div>
           </div>
 
-          <ScrubNumber
-            label="Position"
-            max={getProjectDuration(project) + 60}
-            min={0}
-            sliderWindow={Math.max(15, clipDuration * 1.5)}
-            step={0.05}
-            suffix="s"
-            value={selectedClip.timelineStart}
-            onChange={(value) => dispatch({ clipId: selectedClip.id, timelineStart: value, type: 'MOVE_CLIP' })}
-          />
           <label className="field">
             <span>Track</span>
             <select
