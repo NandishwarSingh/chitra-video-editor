@@ -5489,40 +5489,32 @@ function Inspector({
             </select>
           </label>
 
-          <div className="scrub-row">
-            <ScrubNumber
-              compact
-              label="In"
-              max={selectedClip.sourceOut - 0.1}
-              min={0}
-              step={0.05}
-              suffix="s"
-              value={selectedClip.sourceIn}
-              onChange={(value) => dispatch({ clipId: selectedClip.id, edge: 'start', sourceTime: value, type: 'TRIM_CLIP' })}
-            />
-            <ScrubNumber
-              compact
-              label="Out"
-              max={selectedClipAsset?.duration || selectedClip.sourceOut}
-              min={selectedClip.sourceIn + 0.1}
-              step={0.05}
-              suffix="s"
-              value={selectedClip.sourceOut}
-              onChange={(value) => dispatch({ clipId: selectedClip.id, edge: 'end', sourceTime: value, type: 'TRIM_CLIP' })}
-            />
-          </div>
+          <ScrubNumber
+            label="In"
+            max={selectedClip.sourceOut - 0.1}
+            min={0}
+            step={0.05}
+            suffix="s"
+            value={selectedClip.sourceIn}
+            onChange={(value) => dispatch({ clipId: selectedClip.id, edge: 'start', sourceTime: value, type: 'TRIM_CLIP' })}
+          />
+          <ScrubNumber
+            label="Out"
+            max={selectedClipAsset?.duration || selectedClip.sourceOut}
+            min={selectedClip.sourceIn + 0.1}
+            step={0.05}
+            suffix="s"
+            value={selectedClip.sourceOut}
+            onChange={(value) => dispatch({ clipId: selectedClip.id, edge: 'end', sourceTime: value, type: 'TRIM_CLIP' })}
+          />
 
           {isAudioClip ? null : (
             <div className="section">
               <div className="section-head">Transform</div>
-              <div className="scrub-row">
-                <ScrubNumber compact label="X" max={1} min={0} step={0.01} value={selectedClip.transform.x} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { x: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
-                <ScrubNumber compact label="Y" max={1} min={0} step={0.01} value={selectedClip.transform.y} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { y: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
-              </div>
-              <div className="scrub-row">
-                <ScrubNumber compact label="Scale" max={4} min={0.25} step={0.01} value={selectedClip.transform.scale} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { scale: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
-                <ScrubNumber compact label="Rotate" max={180} min={-180} step={1} suffix="°" value={selectedClip.transform.rotation ?? 0} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { rotation: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
-              </div>
+              <ScrubNumber label="X" max={1} min={0} step={0.01} value={selectedClip.transform.x} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { x: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+              <ScrubNumber label="Y" max={1} min={0} step={0.01} value={selectedClip.transform.y} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { y: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+              <ScrubNumber label="Scale" max={4} min={0.25} step={0.01} value={selectedClip.transform.scale} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { scale: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
+              <ScrubNumber label="Rotate" max={180} min={-180} step={1} suffix="°" value={selectedClip.transform.rotation ?? 0} onChange={(value) => dispatch({ clipId: selectedClip.id, transform: { rotation: value }, type: 'UPDATE_CLIP_TRANSFORM' })} />
             </div>
           )}
 
@@ -5539,10 +5531,8 @@ function Inspector({
               </label>
             </div>
             <ScrubNumber label="Volume" max={2} min={0} step={0.01} value={selectedClip.volume} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { volume: value }, type: 'UPDATE_CLIP_AUDIO' })} />
-            <div className="scrub-row">
-              <ScrubNumber compact label="Fade In" max={clipDuration} min={0} step={0.05} suffix="s" value={selectedClip.fadeIn} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { fadeIn: value }, type: 'UPDATE_CLIP_AUDIO' })} />
-              <ScrubNumber compact label="Fade Out" max={clipDuration} min={0} step={0.05} suffix="s" value={selectedClip.fadeOut} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { fadeOut: value }, type: 'UPDATE_CLIP_AUDIO' })} />
-            </div>
+            <ScrubNumber label="Fade In" max={clipDuration} min={0} step={0.05} suffix="s" value={selectedClip.fadeIn} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { fadeIn: value }, type: 'UPDATE_CLIP_AUDIO' })} />
+            <ScrubNumber label="Fade Out" max={clipDuration} min={0} step={0.05} suffix="s" value={selectedClip.fadeOut} onChange={(value) => dispatch({ clipId: selectedClip.id, patch: { fadeOut: value }, type: 'UPDATE_CLIP_AUDIO' })} />
           </div>
 
           {isAudioClip ? null : (
