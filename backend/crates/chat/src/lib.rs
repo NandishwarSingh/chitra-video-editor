@@ -177,14 +177,30 @@ struct CachedReply {
     usage: Option<TokenUsage>,
 }
 
+/// Editor context split into a long cacheable prefix and a tiny tail that
+/// changes on every interaction. Keeping them separate is the whole point:
+/// the provider's prompt cache matches the stable prefix across turns and
+/// only the volatile tail + new user message get reprocessed.
+#[derive(Default, Clone)]
+struct ContextBlocks {
+    stable: String,
+    volatile: String,
+}
+
 impl ChatClient {
     pub fn new(cfg: ChatConfig) -> Result<Self, ChatError> {
         if cfg.api_key.trim().is_empty() {
             return Err(ChatError::MissingApiKey);
         }
         let http = reqwest::Client::builder()
-            // OpenRouter is occasionally slow on cold paths (cross-provider routing).
-            .timeout(Duration::from_secs(120))
+            // A *total* request timeout kills long-but-healthy streaming
+            // generations: reasoning models (deepseek-v4-pro) on a large
+            // editor context can stream for several minutes, and OpenRouter
+            // sends ": OPENROUTER PROCESSING" keepalives the whole time.
+            // Use a per-read timeout instead — it only trips on a genuine
+            // stall (no bytes for 120 s), not on a slow overall response.
+            .connect_timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(120))
             .build()?;
         let cache = Cache::builder()
             .max_capacity(cfg.cache_capacity)
@@ -197,13 +213,15 @@ impl ChatClient {
         })
     }
 
-    fn cache_key(&self, system: &str, context_block: &str, messages: &[ChatMessage]) -> String {
+    fn cache_key(&self, system: &str, ctx: &ContextBlocks, messages: &[ChatMessage]) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(self.cfg.model.as_bytes());
         hasher.update(b"\x1e");
         hasher.update(system.as_bytes());
         hasher.update(b"\x1e");
-        hasher.update(context_block.as_bytes());
+        hasher.update(ctx.stable.as_bytes());
+        hasher.update(b"\x1e");
+        hasher.update(ctx.volatile.as_bytes());
         for m in messages {
             hasher.update(b"\x1e");
             hasher.update(m.role().as_bytes());
@@ -220,27 +238,20 @@ impl ChatClient {
             .unwrap_or(self.cfg.default_system_prompt.as_str())
     }
 
-    /// Format the editor snapshot as a pinned system message. Kept compact —
-    /// the EAL itself is the bulk; selection/playhead are a few hundred bytes.
-    fn format_context(&self, ctx: Option<&EditorContext>) -> String {
-        let Some(ctx) = ctx else { return String::new() };
-        let mut buf = String::with_capacity(1024);
-        buf.push_str("## Live editor state\n");
+    /// Format the editor snapshot, split into a long *stable* block (project
+    /// name, EAL program, transcripts, beat grids — identical across a Q&A
+    /// flow) and a tiny *volatile* block (playhead, selection — changes on
+    /// every scrub/click). The stable block forms a long cacheable prefix;
+    /// the volatile block is appended AFTER it so a 1 ms playhead change
+    /// doesn't invalidate the provider's prefix cache of the bulk context.
+    fn format_context(&self, ctx: Option<&EditorContext>) -> ContextBlocks {
+        let Some(ctx) = ctx else { return ContextBlocks::default() };
+
+        // --- STABLE: the big, slow-changing bulk. Goes first so the
+        //     provider prefix-cache covers as many tokens as possible. ---
+        let mut buf = String::with_capacity(2048);
         if let Some(name) = &ctx.project_name {
-            buf.push_str(&format!("project: {name}\n"));
-        }
-        buf.push_str(&format!("playhead: {:.3}s\n", ctx.playhead_seconds));
-        if let Some(id) = &ctx.active_clip_id {
-            buf.push_str(&format!("active_clip: {id}\n"));
-        }
-        if let Some(id) = &ctx.selected_clip_id {
-            buf.push_str(&format!("selected_clip: {id}\n"));
-        }
-        if let Some(id) = &ctx.selected_text_id {
-            buf.push_str(&format!("selected_text: {id}\n"));
-        }
-        if let Some(id) = &ctx.selected_track_id {
-            buf.push_str(&format!("selected_track: {id}\n"));
+            buf.push_str(&format!("## Project\nproject: {name}\n"));
         }
         buf.push_str("\n## Edit Array Language (current timeline)\n```eal\n");
         let pretty = serde_json::to_string_pretty(&ctx.edit_array).unwrap_or_else(|_| "[]".into());
@@ -290,7 +301,27 @@ impl ChatClient {
                 }
             }
         }
-        buf
+
+        // --- VOLATILE: a few hundred bytes that change every interaction.
+        //     Kept OUT of the cacheable prefix so scrubbing/selecting never
+        //     forces a full context reprocess. ---
+        let mut vol = String::with_capacity(256);
+        vol.push_str("## Live editor state (volatile)\n");
+        vol.push_str(&format!("playhead: {:.3}s\n", ctx.playhead_seconds));
+        if let Some(id) = &ctx.active_clip_id {
+            vol.push_str(&format!("active_clip: {id}\n"));
+        }
+        if let Some(id) = &ctx.selected_clip_id {
+            vol.push_str(&format!("selected_clip: {id}\n"));
+        }
+        if let Some(id) = &ctx.selected_text_id {
+            vol.push_str(&format!("selected_text: {id}\n"));
+        }
+        if let Some(id) = &ctx.selected_track_id {
+            vol.push_str(&format!("selected_track: {id}\n"));
+        }
+
+        ContextBlocks { stable: buf, volatile: vol }
     }
 
     /// Build the OpenRouter request body, attaching `cache_control: ephemeral`
@@ -302,37 +333,51 @@ impl ChatClient {
     fn build_payload(
         &self,
         system: &str,
-        context_block: &str,
+        ctx: &ContextBlocks,
         messages: &[ChatMessage],
         stream: bool,
     ) -> serde_json::Value {
-        let mut payload_messages = Vec::with_capacity(messages.len() + 2);
+        let mut payload_messages = Vec::with_capacity(messages.len() + 3);
+        let min = self.cfg.prompt_cache_min_chars;
 
-        // 1) Static system prompt — long, identical across every turn, perfect
-        //    candidate for the provider prompt cache. Tag with cache_control
-        //    when it exceeds the threshold.
-        if !system.is_empty() {
-            if system.len() >= self.cfg.prompt_cache_min_chars {
-                payload_messages.push(json!({
+        // Helper: a system message, cache-tagged when long enough to be worth
+        // a provider prefix-cache breakpoint. DeepSeek auto-caches prefixes
+        // regardless; the explicit breakpoint additionally lets Anthropic-
+        // family models cache, and is silently ignored by providers that
+        // don't support it.
+        let sys_block = |text: &str, cache: bool| {
+            if cache && text.len() >= min {
+                json!({
                     "role": "system",
                     "content": [{
                         "type": "text",
-                        "text": system,
+                        "text": text,
                         "cache_control": {"type": "ephemeral"}
                     }]
-                }));
+                })
             } else {
-                payload_messages.push(json!({"role": "system", "content": system}));
+                json!({"role": "system", "content": text})
             }
-        }
+        };
 
-        // 2) Live editor context — changes turn-to-turn (different playhead,
-        //    selection, EAL revisions), so it sits AFTER the cached static
-        //    prefix and is NOT tagged for caching. The provider's prefix
-        //    cache then matches up through the static prompt and only the
-        //    delta has to be reprocessed.
-        if !context_block.is_empty() {
-            payload_messages.push(json!({"role": "system", "content": context_block}));
+        // Order is the optimization. Longest-lived content first so the
+        // cacheable prefix is maximal:
+        //   1. Static system prompt          (never changes)   — cached
+        //   2. Stable editor context         (EAL+transcripts) — cached
+        //   3. Volatile state                (playhead/sel)    — NOT cached
+        //   4. User/assistant turns          (the new delta)
+        // Breakpoints 1 and 2 mean: even when the timeline (EAL) changes,
+        // the system-prompt prefix still hits; when only the playhead moves,
+        // BOTH the system prompt AND the entire stable block still hit and
+        // only a few hundred volatile bytes + the user message reprocess.
+        if !system.is_empty() {
+            payload_messages.push(sys_block(system, true));
+        }
+        if !ctx.stable.is_empty() {
+            payload_messages.push(sys_block(&ctx.stable, true));
+        }
+        if !ctx.volatile.is_empty() {
+            payload_messages.push(sys_block(&ctx.volatile, false));
         }
 
         for msg in messages {
