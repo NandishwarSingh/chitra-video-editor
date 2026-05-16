@@ -1,7 +1,7 @@
 const DB_NAME = 'chitra-project-store';
 import type { ProjectRecord } from './projectPersistence';
 
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 const THUMBNAIL_STORE = 'thumbnail-cache';
 const PROXY_STORE = 'proxy-cache';
 const JOB_METADATA_STORE = 'job-metadata';
@@ -10,6 +10,7 @@ const PROJECT_MEDIA_STORE = 'project-media';
 const PROJECT_POSTERS_STORE = 'project-posters';
 const TRANSCRIPT_STORE = 'asset-transcripts';
 const BEAT_STORE = 'asset-beats';
+const MASK_STORE = 'asset-masks';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -54,6 +55,10 @@ function openDb() {
 
       if (!db.objectStoreNames.contains(BEAT_STORE)) {
         db.createObjectStore(BEAT_STORE);
+      }
+
+      if (!db.objectStoreNames.contains(MASK_STORE)) {
+        db.createObjectStore(MASK_STORE);
       }
     };
 
@@ -314,4 +319,40 @@ export async function getAssetBeats(fingerprint: string): Promise<StoredBeatData
 
 export async function deleteAssetBeats(fingerprint: string) {
   await runTransaction<undefined>(BEAT_STORE, 'readwrite', (store) => store.delete(fingerprint));
+}
+
+// One SAM2/EfficientTAM object track. `maskVideo` is a grayscale H.264 mp4
+// (mask in the luma plane) the compositor + export sample. Keyed by the
+// `ClipMask.maskKey` string the project model carries, NOT the asset
+// fingerprint — a clip can grow multiple object tracks later.
+export type StoredAssetMask = {
+  createdAt: number;
+  device: string;
+  engine: string;
+  frames: number;
+  maskHeight: number;
+  maskVideo: Blob;
+  maskWidth: number;
+  model: string;
+  sourceFps: number;
+};
+
+export async function putAssetMask(maskKey: string, mask: StoredAssetMask) {
+  await runTransaction<IDBValidKey>(MASK_STORE, 'readwrite', (store) => store.put(mask, maskKey));
+}
+
+export async function getAssetMask(maskKey: string): Promise<StoredAssetMask | null> {
+  try {
+    return (
+      (await runTransaction<StoredAssetMask | undefined>(MASK_STORE, 'readonly', (store) =>
+        store.get(maskKey),
+      )) ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
+export async function deleteAssetMask(maskKey: string) {
+  await runTransaction<undefined>(MASK_STORE, 'readwrite', (store) => store.delete(maskKey));
 }
