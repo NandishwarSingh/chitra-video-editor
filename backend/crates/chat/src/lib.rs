@@ -200,6 +200,18 @@ pub struct ChatClient {
 struct CachedReply {
     text: String,
     usage: Option<TokenUsage>,
+    /// Finalized tool calls emitted during this turn. The original cache
+    /// stored only prose, so a cached EDIT request replayed the model's
+    /// "here's what I'll do" text with NO apply_eal — the Apply card never
+    /// appeared on a repeat prompt. Store + replay them.
+    tool_calls: Vec<CachedToolCall>,
+}
+
+#[derive(Clone)]
+struct CachedToolCall {
+    id: String,
+    name: String,
+    arguments: serde_json::Value,
 }
 
 /// Editor context split into a long cacheable prefix and a tiny tail that
@@ -463,7 +475,7 @@ impl ChatClient {
         let cache_hit = classify_cache(usage.as_ref());
 
         self.cache
-            .insert(key, CachedReply { text: text.clone(), usage })
+            .insert(key, CachedReply { text: text.clone(), usage, tool_calls: Vec::new() })
             .await;
 
         Ok((text, cache_hit, usage))
@@ -487,7 +499,16 @@ impl ChatClient {
 
             if let Some(hit) = client.cache.get(&key).await {
                 debug!("local cache hit (stream)");
-                yield ChatStreamEvent::Delta { text: hit.text };
+                if !hit.text.is_empty() {
+                    yield ChatStreamEvent::Delta { text: hit.text };
+                }
+                for tc in hit.tool_calls {
+                    yield ChatStreamEvent::ToolCall {
+                        id: tc.id,
+                        name: tc.name,
+                        arguments: tc.arguments,
+                    };
+                }
                 yield ChatStreamEvent::Done { cache: CacheHit::Local, usage: hit.usage };
                 return;
             }
@@ -524,6 +545,7 @@ impl ChatClient {
             let mut accumulated = String::new();
             let mut final_usage: Option<TokenUsage> = None;
             let mut tool_calls: HashMap<u32, PendingToolCall> = HashMap::new();
+            let mut captured_tools: Vec<CachedToolCall> = Vec::new();
             let mut byte_stream = resp.bytes_stream();
             let mut buffer: Vec<u8> = Vec::new();
 
@@ -559,17 +581,30 @@ impl ChatClient {
                             for (_, mut pending) in tool_calls.drain() {
                                 if pending.emitted { continue; }
                                 if let Some(event) = try_finalize_tool(&mut pending) {
+                                    if let ChatStreamEvent::ToolCall { id, name, arguments } = &event {
+                                        captured_tools.push(CachedToolCall {
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                            arguments: arguments.clone(),
+                                        });
+                                    }
                                     yield event;
                                 }
                             }
                             let cache = classify_cache(final_usage.as_ref());
-                            client
-                                .cache
-                                .insert(
-                                    key.clone(),
-                                    CachedReply { text: accumulated.clone(), usage: final_usage },
-                                )
-                                .await;
+                            if !accumulated.is_empty() || !captured_tools.is_empty() {
+                                client
+                                    .cache
+                                    .insert(
+                                        key.clone(),
+                                        CachedReply {
+                                            text: accumulated.clone(),
+                                            usage: final_usage,
+                                            tool_calls: captured_tools.clone(),
+                                        },
+                                    )
+                                    .await;
+                            }
                             yield ChatStreamEvent::Done { cache, usage: final_usage };
                             return;
                         }
@@ -606,6 +641,13 @@ impl ChatClient {
                                             // don't emit it consistently.
                                             if !entry.emitted {
                                                 if let Some(event) = try_finalize_tool(entry) {
+                                                    if let ChatStreamEvent::ToolCall { id, name, arguments } = &event {
+                                                        captured_tools.push(CachedToolCall {
+                                                            id: id.clone(),
+                                                            name: name.clone(),
+                                                            arguments: arguments.clone(),
+                                                        });
+                                                    }
                                                     yield event;
                                                 }
                                             }
@@ -628,15 +670,26 @@ impl ChatClient {
             for (_, mut pending) in tool_calls.drain() {
                 if pending.emitted { continue; }
                 if let Some(event) = try_finalize_tool(&mut pending) {
+                    if let ChatStreamEvent::ToolCall { id, name, arguments } = &event {
+                        captured_tools.push(CachedToolCall {
+                            id: id.clone(),
+                            name: name.clone(),
+                            arguments: arguments.clone(),
+                        });
+                    }
                     yield event;
                 }
             }
-            if !accumulated.is_empty() {
+            if !accumulated.is_empty() || !captured_tools.is_empty() {
                 client
                     .cache
                     .insert(
                         key,
-                        CachedReply { text: accumulated, usage: final_usage },
+                        CachedReply {
+                            text: accumulated,
+                            usage: final_usage,
+                            tool_calls: captured_tools,
+                        },
                     )
                     .await;
             }
