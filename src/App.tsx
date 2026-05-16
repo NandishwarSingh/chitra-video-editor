@@ -92,6 +92,7 @@ import {
   projectReducer,
   snapToTarget,
   type ClipTransform,
+  type ClipMaskMode,
   type JobStatus,
   type ProjectAsset,
   type ProjectPresent,
@@ -127,11 +128,14 @@ import {
 import {
   createProxyCacheKey,
   deleteCachedProxy,
+  deleteAssetMask,
   getAssetBeatsTolerant,
+  getAssetMask,
   getAssetTranscript,
   getCachedProxy,
   listProjectRecords,
   putAssetBeats,
+  putAssetMask,
   putAssetTranscript,
   putCachedProxy,
   putJobMetadata,
@@ -139,6 +143,7 @@ import {
   type StoredAssetTranscript,
   type StoredBeatData,
 } from './projectStore';
+import { segmentClip } from './segmentation';
 import { detectBeats } from './beatDetection';
 import { runTranscodeJob } from './transcodeClient';
 import { clamp, formatBytes, formatClock } from './time';
@@ -1052,6 +1057,14 @@ function EditorWorkspace({
   const [timelineZoom, setTimelineZoom] = useState(1);
   const [rightPanelTab, setRightPanelTab] = useState<'chat' | 'inspector'>('inspector');
   const [isMobilePanelOpen, setIsMobilePanelOpen] = useState(false);
+  // SAM2 rotoscoping. `maskPickClipId` = the clip waiting for a subject
+  // click on the preview; `segmentingClipIds` drives the spinner;
+  // `maskPreviewUrls` are object URLs of the grayscale matte mp4 (keyed by
+  // ClipMask.maskKey) shown in the inspector to confirm the track visually.
+  const [maskPickClipId, setMaskPickClipId] = useState<string | null>(null);
+  const [segmentingClipIds, setSegmentingClipIds] = useState<Set<string>>(() => new Set());
+  const [maskError, setMaskError] = useState<string | null>(null);
+  const [maskPreviewUrls, setMaskPreviewUrls] = useState<Record<string, string>>({});
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [beatMarkersVisible, setBeatMarkersVisible] = useState(true);
   const [bulkTextEdit, setBulkTextEdit] = useState(false);
@@ -1503,6 +1516,100 @@ function EditorWorkspace({
     },
     [present.assets],
   );
+
+  // Track an object in a clip: send the asset + a click point to the SAM2
+  // sidecar, persist the returned matte to MASK_STORE, and set the clip's
+  // `mask` (which round-trips through EAL). `pointNorm` is 0..1 in the
+  // clip's video frame.
+  const segmentClipObject = useCallback(
+    async (clip: TimelineClip, pointNorm: { x: number; y: number }) => {
+      const asset = present.assets.find((a) => a.id === clip.assetId);
+      if (!asset?.file) return;
+      setMaskError(null);
+      setMaskPickClipId(null);
+      setSegmentingClipIds((cur) => new Set(cur).add(clip.id));
+      try {
+        const px = Math.round(pointNorm.x * (asset.width || 1920));
+        const py = Math.round(pointNorm.y * (asset.height || 1080));
+        const result = await segmentClip(asset.file, asset.name, {
+          frame: 0,
+          labels: [1],
+          points: [[px, py]],
+        });
+        const maskKey = `mask:${clip.id}:${Date.now()}`;
+        await putAssetMask(maskKey, {
+          createdAt: result.createdAt,
+          device: result.device,
+          engine: result.engine,
+          frames: result.frames,
+          maskHeight: result.maskHeight,
+          maskVideo: result.maskVideo,
+          maskWidth: result.maskWidth,
+          model: result.model,
+          sourceFps: result.sourceFps,
+        });
+        setMaskPreviewUrls((cur) => {
+          const prev = cur[maskKey];
+          if (prev) URL.revokeObjectURL(prev);
+          return { ...cur, [maskKey]: URL.createObjectURL(result.maskVideo) };
+        });
+        dispatch({
+          clipId: clip.id,
+          mask: { enabled: true, feather: 0.1, invert: false, maskKey, mode: 'spotlight' },
+          type: 'UPDATE_CLIP_MASK',
+        });
+      } catch (err) {
+        setMaskError(err instanceof Error ? err.message : 'Segmentation failed');
+      } finally {
+        setSegmentingClipIds((cur) => {
+          const next = new Set(cur);
+          next.delete(clip.id);
+          return next;
+        });
+      }
+    },
+    [present.assets],
+  );
+
+  const removeClipMask = useCallback(
+    (clip: TimelineClip) => {
+      if (clip.mask) {
+        void deleteAssetMask(clip.mask.maskKey);
+        setMaskPreviewUrls((cur) => {
+          if (!clip.mask || !cur[clip.mask.maskKey]) return cur;
+          URL.revokeObjectURL(cur[clip.mask.maskKey]);
+          const next = { ...cur };
+          delete next[clip.mask.maskKey];
+          return next;
+        });
+      }
+      dispatch({ clipId: clip.id, mask: null, type: 'UPDATE_CLIP_MASK' });
+    },
+    [],
+  );
+
+  // Rehydrate matte preview URLs for clips that already carry a mask (project
+  // reload restores clip.mask from EAL; the blob lives in MASK_STORE).
+  useEffect(() => {
+    let cancelled = false;
+    const needed = present.clips
+      .map((c) => c.mask?.maskKey)
+      .filter((k): k is string => Boolean(k) && !maskPreviewUrls[k as string]);
+    if (needed.length === 0) return;
+    void Promise.all(needed.map((k) => getAssetMask(k).then((m) => ({ k, m })))).then((rows) => {
+      if (cancelled) return;
+      setMaskPreviewUrls((cur) => {
+        const next = { ...cur };
+        for (const { k, m } of rows) {
+          if (m && !next[k]) next[k] = URL.createObjectURL(m.maskVideo);
+        }
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [present.clips, maskPreviewUrls]);
 
   const assetsMissingBeats = useMemo(
     () =>
@@ -3840,13 +3947,29 @@ function EditorWorkspace({
           <div className={`viewer-stage${!hasTimeline ? ' is-empty' : ''}`} ref={viewerStageRef}>
             {hasTimeline && (activeAsset || lastVideoAssetOnTimeline || lastAudioAssetOnTimeline) ? (
               <div
-                className="preview-frame"
+                className={`preview-frame${maskPickClipId ? ' is-mask-picking' : ''}`}
                 onPointerCancel={endPreviewDirectManipulation}
                 onPointerMove={updatePreviewDirectManipulation}
                 onPointerUp={endPreviewDirectManipulation}
+                onClickCapture={(event) => {
+                  if (!maskPickClipId) return;
+                  const target = present.clips.find((c) => c.id === maskPickClipId);
+                  const rect = previewFrameRef.current?.getBoundingClientRect();
+                  if (!target || !rect || rect.width <= 0 || rect.height <= 0) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const x = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1);
+                  const y = Math.min(Math.max((event.clientY - rect.top) / rect.height, 0), 1);
+                  void segmentClipObject(target, { x, y });
+                }}
                 ref={previewFrameRef}
                 style={previewFrameStyle}
               >
+                {maskPickClipId ? (
+                  <div className="mask-pick-hint" aria-hidden="true">
+                    Click the subject to track
+                  </div>
+                ) : null}
                 {/* Skip layer videos entirely when the topmost active clip covers the canvas
                     (default 1:1 transform). With opaque video clips, anything below is fully
                     occluded — mounting their <video> elements just allocates idle decoders. */}
@@ -4088,6 +4211,12 @@ function EditorWorkspace({
                 setBulkTextEdit={setBulkTextEdit}
                 generateSubtitlesForClip={generateSubtitlesForClip}
                 hasTimeline={hasTimeline}
+                maskError={maskError}
+                maskPickClipId={maskPickClipId}
+                maskPreviewUrls={maskPreviewUrls}
+                removeClipMask={removeClipMask}
+                segmentingClipIds={segmentingClipIds}
+                setMaskPickClipId={setMaskPickClipId}
                 project={present}
                 selectedAsset={selectedAsset}
                 selectedClip={selectedClip}
@@ -4976,6 +5105,12 @@ type InspectorProps = {
   setBulkTextEdit: (next: boolean) => void;
   generateSubtitlesForClip: (clip: TimelineClip, mode: SubtitleMode, template: SubtitleTemplateId) => void;
   hasTimeline: boolean;
+  maskError: string | null;
+  maskPickClipId: string | null;
+  maskPreviewUrls: Record<string, string>;
+  removeClipMask: (clip: TimelineClip) => void;
+  segmentingClipIds: Set<string>;
+  setMaskPickClipId: (id: string | null) => void;
   project: ProjectPresent;
   selectedAsset: ProjectAsset | null;
   selectedClip: TimelineClip | null;
@@ -5238,6 +5373,12 @@ function Inspector({
   dispatch,
   generateSubtitlesForClip,
   hasTimeline,
+  maskError,
+  maskPickClipId,
+  maskPreviewUrls,
+  removeClipMask,
+  segmentingClipIds,
+  setMaskPickClipId,
   project,
   selectedAsset,
   selectedClip,
@@ -5633,6 +5774,97 @@ function Inspector({
               <ScrubNumber label="Brightness" max={0.4} min={-0.4} step={0.01} value={selectedClip.effects.brightness} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { brightness: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
               <ScrubNumber label="Contrast" max={1.8} min={0.5} step={0.01} value={selectedClip.effects.contrast} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { contrast: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
               <ScrubNumber label="Saturation" max={2} min={0} step={0.01} value={selectedClip.effects.saturation} onChange={(value) => dispatch({ clipId: selectedClip.id, effects: { saturation: value }, type: 'UPDATE_CLIP_EFFECTS' })} />
+            </div>
+          )}
+
+          {isAudioClip ? null : (
+            <div className="section">
+              <div className="section-head">Rotoscope</div>
+              {(() => {
+                const isSegmenting = segmentingClipIds.has(selectedClip.id);
+                const isPicking = maskPickClipId === selectedClip.id;
+                const mask = selectedClip.mask;
+                if (isSegmenting) {
+                  return <p className="hint">Tracking the object across the clip… (EfficientTAM on device — this can take a bit)</p>;
+                }
+                if (!mask) {
+                  return (
+                    <>
+                      <button
+                        className="chip"
+                        onClick={() => setMaskPickClipId(isPicking ? null : selectedClip.id)}
+                        type="button"
+                      >
+                        {isPicking ? 'Cancel — click the subject in the preview' : 'Track an object'}
+                      </button>
+                      {maskError ? <p className="hint is-error">{maskError}</p> : null}
+                    </>
+                  );
+                }
+                const previewUrl = maskPreviewUrls[mask.maskKey];
+                return (
+                  <>
+                    <label className="field field-inline">
+                      <span>Mode</span>
+                      <select
+                        onChange={(event) =>
+                          dispatch({
+                            clipId: selectedClip.id,
+                            mask: { ...mask, mode: event.target.value as ClipMaskMode },
+                            type: 'UPDATE_CLIP_MASK',
+                          })
+                        }
+                        value={mask.mode}
+                      >
+                        <option value="spotlight">Spotlight (dim background)</option>
+                        <option value="cutout">Cutout (transparent background)</option>
+                        <option value="blur-bg">Blur background</option>
+                      </select>
+                    </label>
+                    <ScrubNumber
+                      label="Feather"
+                      max={1}
+                      min={0}
+                      step={0.01}
+                      value={mask.feather}
+                      onChange={(value) =>
+                        dispatch({
+                          clipId: selectedClip.id,
+                          mask: { ...mask, feather: value },
+                          type: 'UPDATE_CLIP_MASK',
+                        })
+                      }
+                    />
+                    <label className="toggle-inline">
+                      <input
+                        checked={mask.invert}
+                        onChange={(event) =>
+                          dispatch({
+                            clipId: selectedClip.id,
+                            mask: { ...mask, invert: event.target.checked },
+                            type: 'UPDATE_CLIP_MASK',
+                          })
+                        }
+                        type="checkbox"
+                      />
+                      <span>Invert</span>
+                    </label>
+                    {previewUrl ? (
+                      <video
+                        className="mask-preview"
+                        loop
+                        muted
+                        autoPlay
+                        playsInline
+                        src={previewUrl}
+                      />
+                    ) : null}
+                    <button className="chip" onClick={() => removeClipMask(selectedClip)} type="button">
+                      Remove mask
+                    </button>
+                  </>
+                );
+              })()}
             </div>
           )}
 
