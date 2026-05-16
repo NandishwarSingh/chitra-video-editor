@@ -6,22 +6,26 @@ implementation. Nothing here is built yet.
 
 ## LOCKED DECISIONS (2026-05-16)
 
-1. **Target is a Tauri desktop app**, not a pure browser app. Re-plan after
-   the spike must account for: native sidecars (no localhost HTTP proxy
-   needed — Tauri commands / shell sidecar), **real filesystem** for mask
-   storage (kills the IndexedDB quota constraint in §2.2 — masks become
-   on-disk files keyed by fingerprint), native GPU access, no browser memory
-   ceiling. The existing Rust axum crate is reusable as the Tauri sidecar or
-   collapsed into Tauri commands. The WebGPU compositor stays (Tauri webview
-   supports WebGPU). This is a separate migration plan produced *after* the
-   spike data lands.
+1. **Stays a web app — Tauri is dropped (2026-05-16, reversed after the
+   spike).** The spike proved the engine is a *backend Python sidecar*
+   (EfficientTAM at 8.5 FPS, server-side) reusing the existing axum +
+   WhisperX/madmom sidecar pattern — nothing in the SAM2 plan needs a native
+   shell. Tauri's only real benefit here was on-disk mask storage vs
+   IndexedDB, but the spike measured masks at **2.65 MB per 1800 1080p
+   frames**, so the IndexedDB quota concern in §2.2 is moot. Therefore: keep
+   the browser frontend + axum backend exactly as is; SAM2/EfficientTAM is
+   just another `/api/segment` sidecar endpoint; mask storage stays in
+   IndexedDB (`MASK_STORE`) per §2.2; the WebGPU compositor and EAL wiring
+   are unchanged. No Tauri migration plan is needed; the §3 re-plan deltas
+   that referenced "Tauri changes the transport" are void — transport stays
+   axum HTTP.
 2. **Commercial product, Apache/MIT only.** Engine = EfficientTAM-S / EdgeTAM
    (Apache-2.0). Matting = BiRefNet (MIT) + flow-EMA smoothing only. MatAnyone
    (NTU S-Lab), RVM (GPL-3.0), ProPainter / E2FGVI (non-commercial) are
    **excluded from the bundle**. Object removal scoped to watermark/static-logo
    via LaMa only; full subject removal deferred indefinitely.
-3. **Sequencing: spike only, then re-plan** with hard numbers + the Tauri
-   context. No product/EAL code until the re-plan is approved.
+3. **Sequencing: spike done; re-plan complete.** Hard numbers in
+   "Phase 0 Spike — RESULTS". No product/EAL code until Phase 1 is approved.
 
 ---
 
@@ -365,8 +369,9 @@ not real-time-interactive:
 - Memory is a **non-issue** (1.3 GB peak, flat) — long clips will not OOM.
   This kills the single biggest documented SAM2 production risk outright.
 - Mask storage is **tiny** (2.65 MB / 1800 1080p frames) — the
-  grayscale-mask-video format from §2.2 is validated; on a Tauri desktop app
-  this is just a project-folder file, no IndexedDB quota concern at all.
+  grayscale-mask-video format from §2.2 is validated; at this size the
+  IndexedDB `MASK_STORE` path is fine, no quota concern (this is why Tauri
+  was dropped — see Locked Decision 1).
 - The interactive feel is preserved by the **two-tier** design: browser
   SlimSAM gives the instant click→preview on the current frame (<50 ms);
   EfficientTAM does cross-frame propagation as the background job. The spike
@@ -377,13 +382,13 @@ not real-time-interactive:
 1. **Job model = async from day one** (was "v1 synchronous"). At ~0.28×
    realtime, even a short clip exceeds a comfortable synchronous HTTP hold.
    Use the `TranscodeWorker`-style job + progress model immediately; the
-   runner already emits parseable progress to stderr. On Tauri this is a
-   long-lived sidecar with a job queue, not an axum request.
-2. **Tauri changes the transport, not the engine.** The Python venv +
-   EfficientTAM stays exactly as spiked. Tauri replaces the axum HTTP
-   endpoint with a Rust command spawning the same sidecar; masks write to
-   the project folder on disk (drop §2.2's IndexedDB chunking entirely —
-   it was a browser-only constraint). The WebGPU compositor + EAL wiring
+   runner already emits parseable progress to stderr. This is an axum
+   long-lived-sidecar job with a queue, not a blocking request.
+2. **Stays web/axum — Tauri dropped (see Locked Decision 1).** The Python
+   venv + EfficientTAM is a `/api/segment` sidecar exactly like
+   WhisperX/madmom. Masks persist to IndexedDB `MASK_STORE` per §2.2 (chunked
+   as specified — the 2.65 MB measurement makes quota a non-issue but the
+   chunking still helps scrub/stream). The WebGPU compositor + EAL wiring
    (§2.4) are unchanged.
 3. **Default tier = EfficientTAM-S 512** (proven 8.5 FPS / 1.3 GB). Offer
    `efficienttam_ti` as a faster/lower-quality option and frame-striding
@@ -398,12 +403,15 @@ not real-time-interactive:
    pitfalls research is only needed for multi-minute single-prompt tracks —
    defer it to a Phase-1 hardening task, not a blocker.
 
-### Open items for the Tauri re-plan (separate doc, after approval)
+### Open items (web stack — resolve during Phase 1)
 
-- Tauri sidecar packaging of a ~2 GB Python/torch venv (or ship a frozen
-  binary) — distribution-size decision.
-- Whether the existing axum crate stays as a localhost sidecar (least churn)
-  or collapses into Tauri commands.
-- Code-signing/notarization implications of bundling a Python runtime.
+- Python/torch venv (~2 GB) install UX: `install-sam2.sh` is the same
+  one-time setup story as WhisperX; document it, gate the feature behind a
+  capability check when the sidecar isn't configured.
+- Async job transport: reuse the `TranscodeWorker` job model + a
+  `GET /api/segment/:id` poll or the `routes/chat.rs` SSE precedent for
+  progress. No new architecture.
+- IndexedDB `MASK_STORE` chunking + LRU decode cache per §2.2 (quota is not a
+  risk at measured sizes, but chunking still benefits scrub/stream).
 
 These do not block Phase 1; they are migration-plan scope.
