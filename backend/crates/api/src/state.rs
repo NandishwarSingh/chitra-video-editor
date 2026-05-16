@@ -13,6 +13,7 @@ use tracing::{info, warn};
 
 use crate::beats::BeatsClient;
 use crate::config::Config;
+use crate::segment::Sam2Client;
 use crate::transcribe::TranscribeClient;
 
 #[derive(Clone)]
@@ -26,6 +27,7 @@ struct Inner {
     pub transcode: TranscodeWorker,
     pub transcribe: Option<TranscribeClient>,
     pub beats: BeatsClient,
+    pub segment: Option<Sam2Client>,
     pub allowed_origins: Vec<String>,
 }
 
@@ -88,6 +90,15 @@ impl AppState {
             warn!(provider = %cfg.beats.provider, "beat provider misconfigured — /api/detect-beats will reject");
         }
 
+        let segment = if cfg.segment.is_enabled() {
+            let client = Sam2Client::new(cfg.segment.clone());
+            info!(model = %client.model(), "segmentation ready");
+            Some(client)
+        } else {
+            warn!("CHITRA_SAM2_* not set — /api/segment will return 503. Run scripts/install-sam2.sh.");
+            None
+        };
+
         Ok(Self {
             inner: Arc::new(Inner {
                 chat,
@@ -95,6 +106,7 @@ impl AppState {
                 transcode,
                 transcribe,
                 beats,
+                segment,
                 allowed_origins: cfg.allowed_origins.clone(),
             }),
         })
@@ -114,6 +126,10 @@ impl AppState {
 
     pub fn transcribe(&self) -> Option<&TranscribeClient> {
         self.inner.transcribe.as_ref()
+    }
+
+    pub fn segment(&self) -> Option<&Sam2Client> {
+        self.inner.segment.as_ref()
     }
 
     pub fn beats(&self) -> &BeatsClient {

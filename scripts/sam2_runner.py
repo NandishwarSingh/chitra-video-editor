@@ -140,8 +140,11 @@ def main() -> int:
                     labels=np.array(prompt.get("labels", [1]), dtype=np.int32),
                 )
             propagated = 0
+            mask_h, mask_w = 0, 0
             for fidx, _obj_ids, logits in predictor.propagate_in_video(state):
                 m = (logits[0] > 0.0).squeeze().cpu().numpy().astype(np.uint8) * 255
+                if mask_h == 0:
+                    mask_h, mask_w = int(m.shape[0]), int(m.shape[1])
                 from PIL import Image
                 Image.fromarray(m, mode="L").save(
                     os.path.join(masks_dir, f"{fidx:05d}.png")
@@ -167,6 +170,8 @@ def main() -> int:
         "frames": n_frames,
         "propagated": propagated,
         "source_fps": fps,
+        "mask_width": mask_w,
+        "mask_height": mask_h,
         "mask_video": mask_video,
         "timings_s": {
             "extract": round(t_extract, 2),

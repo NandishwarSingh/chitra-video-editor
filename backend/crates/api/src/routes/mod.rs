@@ -10,6 +10,7 @@ mod chat;
 mod health;
 mod jobs;
 mod projects;
+mod segment;
 mod transcribe;
 
 pub fn router(state: AppState) -> Router {
@@ -36,6 +37,7 @@ pub fn router(state: AppState) -> Router {
         .nest("/api/assets", assets::router())
         .nest("/api/jobs", jobs::router())
         .nest("/api/transcribe", transcribe::router())
+        .nest("/api/segment", segment::router())
         .nest("/api/detect-beats", beats::router())
         .with_state(state)
         // Multipart STT uploads can be GB-scale (raw 4K clip blobs sent

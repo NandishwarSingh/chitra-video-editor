@@ -11,6 +11,7 @@ use chitra_storage::StorageConfig;
 use chitra_transcode::TranscodeConfig;
 
 use crate::beats::BeatsConfig;
+use crate::segment::Sam2Config;
 use crate::transcribe::TranscribeConfig;
 
 pub struct Config {
@@ -21,6 +22,7 @@ pub struct Config {
     pub transcode: TranscodeConfig,
     pub transcribe: TranscribeConfig,
     pub beats: BeatsConfig,
+    pub segment: Sam2Config,
 }
 
 impl Config {
@@ -92,6 +94,15 @@ impl Config {
             ffmpeg_path: ffmpeg_path.clone(),
         };
 
+        let segment = Sam2Config {
+            python: env::var("CHITRA_SAM2_PYTHON").unwrap_or_default(),
+            runner: env::var("CHITRA_SAM2_RUNNER").unwrap_or_default(),
+            repo: env::var("CHITRA_SAM2_REPO").unwrap_or_default(),
+            model: env::var("CHITRA_SAM2_MODEL")
+                .unwrap_or_else(|_| "efficienttam_s_512x512".to_string()),
+            ffmpeg_path: ffmpeg_path.clone(),
+        };
+
         Ok(Self {
             bind_addr,
             allowed_origins,
@@ -100,6 +111,7 @@ impl Config {
             transcode,
             transcribe,
             beats,
+            segment,
         })
     }
 }

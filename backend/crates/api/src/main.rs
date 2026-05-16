@@ -10,6 +10,7 @@ mod beats;
 mod config;
 mod error;
 mod routes;
+mod segment;
 mod state;
 mod transcribe;
 
