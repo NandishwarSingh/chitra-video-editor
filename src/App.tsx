@@ -1142,12 +1142,56 @@ function EditorWorkspace({
     }> = [];
     const selectedClipId = snapshot.present.selectedClipId;
 
+    const FILLER_WORDS = new Set([
+      'um', 'umm', 'uh', 'uhh', 'uhm', 'erm', 'er', 'ah', 'ahh', 'eh',
+      'hmm', 'hm', 'mhm', 'mm', 'mmm',
+    ]);
+    const normalizeWord = (w: string) => w.toLowerCase().replace(/[^a-z']/g, '');
+
     const formatExcerpt = (transcript: StoredAssetTranscript, clip: TimelineClip): string => {
       const segments = transcript.segments
         .filter((seg) => seg.end >= clip.sourceIn - 0.25 && seg.start <= clip.sourceOut + 0.25)
         .map((seg) => `[${seg.start.toFixed(2)}-${seg.end.toFixed(2)}] ${seg.text.trim()}`);
-      if (segments.length === 0) return transcript.text;
-      return segments.join('\n');
+      const readable = segments.length === 0 ? transcript.text : segments.join('\n');
+
+      // Word-level data (WhisperX / whisper.cpp reconstruction) lets us hand
+      // the model EXACT removable ranges in source-time seconds, so "cut the
+      // filler and dead air" becomes a concrete edit instead of guesswork.
+      const words = transcript.words.filter(
+        (w) => w.end >= clip.sourceIn - 0.25 && w.start <= clip.sourceOut + 0.25,
+      );
+      if (words.length === 0) return readable;
+
+      const removable: string[] = [];
+      const leadIn = words[0].start - clip.sourceIn;
+      if (leadIn > 0.4) {
+        removable.push(`silence ${clip.sourceIn.toFixed(2)}-${words[0].start.toFixed(2)} (${leadIn.toFixed(2)}s lead-in)`);
+      }
+      for (let i = 0; i < words.length - 1; i += 1) {
+        const gap = words[i + 1].start - words[i].end;
+        if (gap > 0.6) {
+          removable.push(
+            `silence ${words[i].end.toFixed(2)}-${words[i + 1].start.toFixed(2)} (${gap.toFixed(2)}s pause)`,
+          );
+        }
+      }
+      const lastEnd = words[words.length - 1].end;
+      const tail = clip.sourceOut - lastEnd;
+      if (tail > 0.4) {
+        removable.push(`silence ${lastEnd.toFixed(2)}-${clip.sourceOut.toFixed(2)} (${tail.toFixed(2)}s trailing)`);
+      }
+      for (let i = 0; i < words.length; i += 1) {
+        const norm = normalizeWord(words[i].word);
+        if (!norm) continue;
+        if (FILLER_WORDS.has(norm)) {
+          removable.push(`filler "${words[i].word.trim()}" ${words[i].start.toFixed(2)}-${words[i].end.toFixed(2)}`);
+        } else if (i > 0 && norm === normalizeWord(words[i - 1].word) && norm.length > 1) {
+          removable.push(`repeat "${words[i].word.trim()}" ${words[i].start.toFixed(2)}-${words[i].end.toFixed(2)}`);
+        }
+      }
+
+      if (removable.length === 0) return readable;
+      return `${readable}\n\n[Removable ranges — source-time seconds, keep everything else]\n${removable.join('\n')}`;
     };
 
     const addTranscriptFor = (clip: TimelineClip) => {

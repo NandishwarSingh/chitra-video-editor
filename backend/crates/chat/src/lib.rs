@@ -114,6 +114,31 @@ Use prose for explanations, judgement calls, asking clarifying questions, or any
 
 You may receive `## Transcripts (clips at playhead)` blocks with per-segment timestamps. Treat the timestamps as **source-time** (relative to the asset, not the timeline). Translate by adding the clip's `start` and subtracting its `from` when proposing timeline-time edits.
 
+A transcript block may also include a `[Removable ranges — source-time seconds, keep everything else]` list. Each line is a precise source-time span the user almost certainly wants gone: `silence A-B`, `filler "uh" A-B`, `repeat "the" A-B`. These numbers are exact — use them directly, do not re-estimate from the prose.
+
+## Silence & filler removal ("cut the dead air", "remove the ums", "tighten this", "prepare for production")
+
+This is the most common edit. `cut` only SPLITS — it never deletes. To actually remove parts you rebuild the clip as **multiple adjacent clip entries that together skip the removable ranges and have their timeline `start`s packed end-to-end so the gap is closed (ripple)**.
+
+Algorithm:
+1. Take the clip's source window `[from, to]` and the sorted `Removable ranges`.
+2. Compute the **keep segments** = `[from, to]` minus every removable range. (e.g. clip from 0→20, remove silence 4.2-6.0 and filler 9.1-9.4 → keep [0,4.2], [6.0,9.1], [9.4,20].)
+3. Emit one `clip` entry per keep segment, same `assetId`/`trackId`/`transform`/`volume`, with:
+   - `from` / `to` = that keep segment's source range
+   - `duration` = `to - from`
+   - `start` = previous piece's `start + duration` (first piece keeps the original clip `start`). This packing is what removes the dead air.
+   - unique `id` per piece (`<origId>-1`, `<origId>-2`, …); the first piece may keep the original id.
+4. Drop the removable ranges entirely — never emit a clip entry for them.
+5. Do NOT emit `cut` markers for this; `cut` keeps the removed content on the timeline. Adjacent clip entries are the only way to delete + ripple.
+
+Worked example — clip `clip-a` (asset `vid`, start 00:00:00.000, from 0, to 20.000), removable: `silence 4.20-6.00`, `filler "uh" 9.10-9.40`:
+```
+["clip","vid",{"id":"clip-a","start":"00:00:00.000","from":"00:00:00.000","to":"00:00:04.200","duration":"00:00:04.200", ...}],
+["clip","vid",{"id":"clip-a-2","start":"00:00:04.200","from":"00:00:06.000","to":"00:00:09.100","duration":"00:00:03.100", ...}],
+["clip","vid",{"id":"clip-a-3","start":"00:00:07.300","from":"00:00:09.400","to":"00:00:20.000","duration":"00:00:10.600", ...}]
+```
+Note the `start`s (0.000, 4.200, 7.300) are contiguous = total ≈ 17.9 s, the 2.1 s of junk is gone. Keep any other tracks (music, text) unchanged unless the user asked to retime them too. If a keep segment would be shorter than ~0.05 s, merge it into its neighbour rather than emitting a sliver.
+
 ## Subtitles
 
 When the user asks for subtitles / captions / "burn in dialogue":
