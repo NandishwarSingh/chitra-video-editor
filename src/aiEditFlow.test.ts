@@ -59,6 +59,7 @@ function projectWithOneClip(): ProjectPresent {
         fadeIn: 0,
         fadeOut: 0,
         id: 'c1',
+        mask: null,
         muted: false,
         sourceIn: 0,
         sourceOut: 30,

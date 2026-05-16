@@ -10,6 +10,7 @@ function clip(): TimelineClip {
     fadeIn: 0,
     fadeOut: 0,
     id: 'c',
+    mask: null,
     muted: false,
     sourceIn: 2,
     sourceOut: 12, // 10s of source rendered on timeline starting at t=5

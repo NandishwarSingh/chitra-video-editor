@@ -4,8 +4,10 @@ import type { ProjectSettings } from './projectPersistence';
 import {
   DEFAULT_TEXT_OVERLAY,
   TEXT_FONT_FAMILIES,
+  clampClipMask,
   clampClipTransform,
   normalizeTimelineTrack,
+  type ClipMask,
   type ClipTransform,
   type TextFontFamilyId,
   type TextOverlay,
@@ -65,7 +67,6 @@ const RESERVED_OPCODES = new Set([
   'camera',
   'generated_asset',
   'keyframe',
-  'mask',
   'search',
   'subtitle',
   'transition',
@@ -162,6 +163,7 @@ export function compileEditArrayToIr(program: EditArrayProgram | readonly unknow
   };
   const clipAudio = new Map<string, Partial<Pick<TimelineClip, 'fadeIn' | 'fadeOut' | 'muted' | 'volume'>>>();
   const clipEffects = new Map<string, EffectSettings>();
+  const clipMask = new Map<string, ClipMask | null>();
 
   for (const instruction of program as readonly unknown[]) {
     if (!Array.isArray(instruction) || typeof instruction[0] !== 'string') {
@@ -282,6 +284,7 @@ export function compileEditArrayToIr(program: EditArrayProgram | readonly unknow
         fadeOut: parseEditArrayTime(options.fadeOut),
         id: stringValue(options.id, `clip-${ir.clips.length + 1}`),
         layer: stringValue(options.layer, `video:${trackId}`),
+        mask: null,
         muted: Boolean(options.muted),
         sourceIn,
         sourceOut,
@@ -312,6 +315,14 @@ export function compileEditArrayToIr(program: EditArrayProgram | readonly unknow
       const clipId = stringValue(payload[0]);
       if (clipId) {
         clipEffects.set(clipId, parseEffectSettings(payload[2]));
+      }
+      continue;
+    }
+
+    if (opcode === 'mask') {
+      const clipId = stringValue(payload[0]);
+      if (clipId) {
+        clipMask.set(clipId, clampClipMask(payload[1]));
       }
       continue;
     }
@@ -395,6 +406,7 @@ export function compileEditArrayToIr(program: EditArrayProgram | readonly unknow
       ...clip,
       ...clipAudio.get(clip.id),
       effects: clipEffects.get(clip.id) ?? clip.effects,
+      mask: clipMask.has(clip.id) ? clipMask.get(clip.id) ?? null : clip.mask,
     }))
     .sort((a, b) => a.timelineStart - b.timelineStart);
 

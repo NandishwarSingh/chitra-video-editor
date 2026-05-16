@@ -89,7 +89,7 @@ const checks = [
     typeName: 'ProjectAsset',
   }),
   createEditArrayCoverageCheck({
-    covered: ['id', 'assetId', 'trackId', 'timelineStart', 'sourceIn', 'sourceOut', 'volume', 'muted', 'fadeIn', 'fadeOut', 'effects', 'transform'],
+    covered: ['id', 'assetId', 'trackId', 'timelineStart', 'sourceIn', 'sourceOut', 'volume', 'muted', 'fadeIn', 'fadeOut', 'effects', 'transform', 'mask'],
     file: 'src/projectModel.ts',
     omitted: [],
     typeName: 'TimelineClip',

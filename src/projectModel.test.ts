@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_TEXT_OVERLAY,
+  clampClipMask,
   collectSnapTargets,
   createInitialProject,
   getActiveTextOverlays,
@@ -700,5 +701,49 @@ describe('SHIFT_TEXTS_BY', () => {
     const before = state.present.textOverlays;
     expect(projectReducer(state, { delta: 0, textIds: ['t-1'], type: 'SHIFT_TEXTS_BY' }).present.textOverlays).toBe(before);
     expect(projectReducer(state, { delta: 1, textIds: [], type: 'SHIFT_TEXTS_BY' }).present.textOverlays).toBe(before);
+  });
+});
+
+describe('clip mask', () => {
+  it('clampClipMask normalizes and rejects invalid input', () => {
+    expect(clampClipMask(null)).toBeNull();
+    expect(clampClipMask({})).toBeNull(); // no maskKey → no mask
+    expect(clampClipMask({ maskKey: 'k' })).toEqual({
+      enabled: true,
+      feather: 0,
+      invert: false,
+      maskKey: 'k',
+      mode: 'spotlight', // unknown/missing mode defaults to spotlight
+    });
+    expect(
+      clampClipMask({ enabled: false, feather: 5, invert: 1, maskKey: 'k', mode: 'cutout' }),
+    ).toEqual({ enabled: false, feather: 1, invert: true, maskKey: 'k', mode: 'cutout' });
+    expect(clampClipMask({ feather: -3, maskKey: 'k', mode: 'bogus' })).toMatchObject({
+      feather: 0,
+      mode: 'spotlight',
+    });
+  });
+
+  it('UPDATE_CLIP_MASK sets and clears a clip mask', () => {
+    let state = createInitialProject();
+    state = projectReducer(state, { assets: [asset('a', 10)], type: 'ADD_ASSETS' });
+    state = projectReducer(state, { assetId: 'a', clipId: 'clip-a', type: 'ADD_ASSET_TO_TIMELINE' });
+    expect(state.present.clips[0].mask).toBeNull();
+
+    state = projectReducer(state, {
+      clipId: 'clip-a',
+      mask: { enabled: true, feather: 0.5, invert: false, maskKey: 'mask:a', mode: 'blur-bg' },
+      type: 'UPDATE_CLIP_MASK',
+    });
+    expect(state.present.clips[0].mask).toEqual({
+      enabled: true,
+      feather: 0.5,
+      invert: false,
+      maskKey: 'mask:a',
+      mode: 'blur-bg',
+    });
+
+    state = projectReducer(state, { clipId: 'clip-a', mask: null, type: 'UPDATE_CLIP_MASK' });
+    expect(state.present.clips[0].mask).toBeNull();
   });
 });

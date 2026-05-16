@@ -42,12 +42,26 @@ export type ClipTransform = {
   y: number;
 };
 
+export type ClipMaskMode = 'blur-bg' | 'cutout' | 'spotlight';
+
+/** A SAM2/EfficientTAM object track bound to a clip. The mask pixels live in
+ *  IndexedDB `MASK_STORE` keyed by `maskKey`; the model only carries the
+ *  reference + creative params. `null` on a clip means "no mask". */
+export type ClipMask = {
+  enabled: boolean;
+  feather: number;
+  invert: boolean;
+  maskKey: string;
+  mode: ClipMaskMode;
+};
+
 export type TimelineClip = {
   assetId: string;
   effects: EffectSettings;
   fadeIn: number;
   fadeOut: number;
   id: string;
+  mask: ClipMask | null;
   muted: boolean;
   sourceIn: number;
   sourceOut: number;
@@ -56,6 +70,27 @@ export type TimelineClip = {
   transform: ClipTransform;
   volume: number;
 };
+
+const CLIP_MASK_MODES: ReadonlySet<ClipMaskMode> = new Set<ClipMaskMode>([
+  'blur-bg',
+  'cutout',
+  'spotlight',
+]);
+
+export function clampClipMask(value: unknown): ClipMask | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Partial<ClipMask>;
+  const maskKey = typeof v.maskKey === 'string' ? v.maskKey : '';
+  if (!maskKey) return null;
+  const mode = CLIP_MASK_MODES.has(v.mode as ClipMaskMode) ? (v.mode as ClipMaskMode) : 'spotlight';
+  return {
+    enabled: v.enabled !== false,
+    feather: Math.min(Math.max(Number.isFinite(v.feather) ? Number(v.feather) : 0, 0), 1),
+    invert: Boolean(v.invert),
+    maskKey,
+    mode,
+  };
+}
 
 export const DEFAULT_TEXT_TRACK_ID = 'text-1';
 
@@ -195,6 +230,7 @@ export type ProjectAction =
   | { clipId: string; patch: Partial<Pick<TimelineClip, 'fadeIn' | 'fadeOut' | 'muted' | 'volume'>>; type: 'UPDATE_CLIP_AUDIO' }
   | { clipId: string; effects: Partial<EffectSettings>; type: 'UPDATE_CLIP_EFFECTS' }
   | { clipId: string; record?: boolean; transform: Partial<ClipTransform>; type: 'UPDATE_CLIP_TRANSFORM' }
+  | { clipId: string; mask: ClipMask | null; type: 'UPDATE_CLIP_MASK' }
   | { overlay: TextOverlay; type: 'ADD_TEXT' }
   | { overlays: TextOverlay[]; rangeEnd: number; rangeStart: number; trackId: string; type: 'REPLACE_TEXTS_IN_RANGE' }
   | { delta: number; textIds: string[]; type: 'SHIFT_TEXTS_BY' }
@@ -302,6 +338,7 @@ export function createTimelineClip(
     fadeIn: 0,
     fadeOut: 0,
     id,
+    mask: null,
     muted: false,
     sourceIn: 0,
     sourceOut: Math.max(MIN_CLIP_DURATION, assetDuration || MIN_CLIP_DURATION),
@@ -387,6 +424,7 @@ export function normalizeTimelineClip(
     fadeIn: Math.max(0, Number.isFinite(clip.fadeIn) ? Number(clip.fadeIn) : 0),
     fadeOut: Math.max(0, Number.isFinite(clip.fadeOut) ? Number(clip.fadeOut) : 0),
     id: clip.id ?? createNormalizedClipId(),
+    mask: clampClipMask(clip.mask),
     muted: Boolean(clip.muted),
     sourceIn,
     sourceOut,
@@ -1322,6 +1360,12 @@ function reducePresent(project: ProjectPresent, action: ProjectAction): ProjectP
           ...clip.transform,
           ...action.transform,
         }),
+      }));
+
+    case 'UPDATE_CLIP_MASK':
+      return updateClip(project, action.clipId, (clip) => ({
+        ...clip,
+        mask: clampClipMask(action.mask),
       }));
 
     case 'ADD_TEXT': {

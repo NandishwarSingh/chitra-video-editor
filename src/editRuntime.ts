@@ -126,6 +126,7 @@ export function executeEditPlan(plan: CompiledEditPlan, currentProject: ProjectP
     fadeIn: clip.fadeIn,
     fadeOut: clip.fadeOut,
     id: clip.id,
+    mask: clip.mask,
     muted: clip.muted,
     sourceIn: clip.sourceIn,
     sourceOut: clip.sourceOut,

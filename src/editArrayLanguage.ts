@@ -21,13 +21,13 @@ export const EDIT_ARRAY_REQUIRED_OPCODES = [
   'composite',
   'audio',
   'effect',
+  'mask',
   'text',
 ] as const;
 
 export const EDIT_ARRAY_RESERVED_OPCODES = [
   'transition',
   'subtitle',
-  'mask',
   'keyframe',
   'animation',
   'camera',
@@ -101,7 +101,7 @@ export const EDIT_ARRAY_FIELD_POLICY = {
     omitted: [],
   },
   TimelineClip: {
-    covered: ['id', 'assetId', 'trackId', 'timelineStart', 'sourceIn', 'sourceOut', 'volume', 'muted', 'fadeIn', 'fadeOut', 'effects', 'transform'],
+    covered: ['id', 'assetId', 'trackId', 'timelineStart', 'sourceIn', 'sourceOut', 'volume', 'muted', 'fadeIn', 'fadeOut', 'effects', 'transform', 'mask'],
     omitted: [],
   },
   TimelineTrack: {
@@ -160,6 +160,7 @@ export type EditArrayInstruction =
   | ['cut', { afterClip: string; at: string }]
   | ['audio', string, { fadeIn: string; fadeOut: string; muted: boolean; volume: number }]
   | ['effect', string, 'color_grade', TimelineClip['effects']]
+  | ['mask', string, NonNullable<TimelineClip['mask']>]
   | [
       'text',
       string,
@@ -362,6 +363,9 @@ function createEditArrayProgram(
       },
     ]);
     program.push(['effect', clip.id, 'color_grade', { ...DEFAULT_EFFECT_SETTINGS, ...clip.effects }]);
+    if (clip.mask) {
+      program.push(['mask', clip.id, { ...clip.mask }]);
+    }
 
     if (index < clips.length - 1) {
       program.push(['cut', { afterClip: clip.id, at: formatEditArrayTime(clipEnd) }]);

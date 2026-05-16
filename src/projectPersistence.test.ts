@@ -40,6 +40,7 @@ function runtimeProject(): ProjectPresent {
         fadeIn: 0,
         fadeOut: 0,
         id: 'clip-a',
+        mask: null,
         muted: false,
         sourceIn: 0,
         sourceOut: 5,

@@ -45,6 +45,7 @@ function project(): ProjectPresent {
         fadeIn: 0.25,
         fadeOut: 0,
         id: 'clip-1',
+        mask: null,
         muted: false,
         sourceIn: 1,
         sourceOut: 4,
@@ -166,6 +167,7 @@ describe('Edit Array Language', () => {
       'composite',
       'audio',
       'effect',
+      'mask',
       'text',
     ]);
     expect(EDIT_ARRAY_FIELD_POLICY.TimelineClip.covered).toContain('timelineStart');
@@ -182,6 +184,10 @@ describe('Edit Array Language', () => {
     expect(EDIT_ARRAY_RESERVED_OPCODES).toContain('keyframe');
     expect(EDIT_ARRAY_RESERVED_OPCODES).toContain('subtitle');
     expect(EDIT_ARRAY_RESERVED_OPCODES).toContain('beat_grid');
+    // `mask` was promoted reserved → required (Phase 1 / Slice 2).
+    expect(EDIT_ARRAY_RESERVED_OPCODES).not.toContain('mask');
+    expect(EDIT_ARRAY_REQUIRED_OPCODES).toContain('mask');
+    expect(EDIT_ARRAY_FIELD_POLICY.TimelineClip.covered).toContain('mask');
     expect(EDIT_ARRAY_SYSTEM_COMPONENTS).toContain('Edit Compiler');
     expect(EDIT_ARRAY_SYSTEM_COMPONENTS).toContain('Edit Repair Loop');
   });

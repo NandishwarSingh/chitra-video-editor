@@ -41,6 +41,7 @@ function project(): ProjectPresent {
         fadeIn: 0,
         fadeOut: 0,
         id: 'clip-1',
+        mask: null,
         muted: false,
         sourceIn: 1,
         sourceOut: 4,
@@ -98,6 +99,40 @@ describe('Edit compiler and runtime', () => {
       x: 0.4,
       y: 0.6,
     });
+  });
+
+  it('round-trips TimelineClip.mask through EAL', () => {
+    const sourceProject = project();
+    sourceProject.clips = sourceProject.clips.map((clip) => ({
+      ...clip,
+      mask: {
+        enabled: true,
+        feather: 0.35,
+        invert: false,
+        maskKey: 'mask:proj:obj-1',
+        mode: 'spotlight' as const,
+      },
+    }));
+    const plan = compileEditArrayProgram(
+      createEditArrayFromRuntime(sourceProject, PROJECT_PRESETS.vertical, 'Runtime'),
+    );
+    const result = executeEditPlan(plan, sourceProject);
+    expect(result.project.clips[0].mask).toEqual({
+      enabled: true,
+      feather: 0.35,
+      invert: false,
+      maskKey: 'mask:proj:obj-1',
+      mode: 'spotlight',
+    });
+  });
+
+  it('a clip with no mask round-trips as null', () => {
+    const sourceProject = project();
+    const plan = compileEditArrayProgram(
+      createEditArrayFromRuntime(sourceProject, PROJECT_PRESETS.vertical, 'Runtime'),
+    );
+    const result = executeEditPlan(plan, sourceProject);
+    expect(result.project.clips[0].mask).toBeNull();
   });
 
   it('executes a compiled plan against available runtime media', () => {

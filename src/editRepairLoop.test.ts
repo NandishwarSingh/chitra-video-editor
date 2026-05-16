@@ -36,6 +36,7 @@ function project(): ProjectPresent {
         fadeIn: 0,
         fadeOut: 0,
         id: 'clip-1',
+        mask: null,
         muted: false,
         sourceIn: 1,
         sourceOut: 4,
