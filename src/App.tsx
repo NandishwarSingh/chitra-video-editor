@@ -486,6 +486,140 @@ function PreviewLayerVideo({ asset, clip, isPlaying, localTime, playbackRate, st
   return <video className="preview-layer-video" playsInline preload="metadata" ref={layerVideoRef} src={asset.playbackUrl} style={style} />;
 }
 
+type MaskSpotlightOverlayProps = {
+  clip: TimelineClip;
+  isPlaying: boolean;
+  localTime: number;
+  maskUrl: string;
+  sourceVideoRef: { current: HTMLMediaElement | null };
+  style: CSSProperties;
+};
+
+// Canvas2D spotlight/cutout/blur-bg render. Deliberately NOT in the WebGPU
+// previewCompositor (zero perf-gate risk, isolated, removable). A hidden
+// grayscale matte <video> is synced to clip.sourceIn+localTime; each frame
+// we build an alpha stencil from its luma and composite per mode.
+function MaskSpotlightOverlay({ clip, isPlaying, localTime, maskUrl, sourceVideoRef, style }: MaskSpotlightOverlayProps) {
+  const maskVideoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const stencilRef = useRef<HTMLCanvasElement | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const mask = clip.mask;
+
+  useEffect(() => {
+    if (!mask) return;
+    const maskVideo = maskVideoRef.current;
+    const canvas = canvasRef.current;
+    if (!maskVideo || !canvas) return;
+
+    const draw = () => {
+      const ctx = canvas.getContext('2d');
+      const mw = maskVideo.videoWidth;
+      const mh = maskVideo.videoHeight;
+      if (!ctx || mw === 0 || mh === 0 || maskVideo.readyState < 2) return;
+      if (canvas.width !== mw || canvas.height !== mh) {
+        canvas.width = mw;
+        canvas.height = mh;
+      }
+      // Build an alpha stencil from the matte luma (white subject → opaque).
+      let stencil = stencilRef.current;
+      if (!stencil) {
+        stencil = document.createElement('canvas');
+        stencilRef.current = stencil;
+      }
+      if (stencil.width !== mw || stencil.height !== mh) {
+        stencil.width = mw;
+        stencil.height = mh;
+      }
+      const sctx = stencil.getContext('2d');
+      if (!sctx) return;
+      sctx.drawImage(maskVideo, 0, 0, mw, mh);
+      const img = sctx.getImageData(0, 0, mw, mh);
+      const d = img.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const a = clip.mask?.invert ? 255 - d[i] : d[i];
+        d[i] = 0;
+        d[i + 1] = 0;
+        d[i + 2] = 0;
+        d[i + 3] = a;
+      }
+      sctx.putImageData(img, 0, 0);
+
+      ctx.clearRect(0, 0, mw, mh);
+      ctx.filter = 'none';
+      const featherPx = Math.round((clip.mask?.feather ?? 0) * 12);
+
+      if (mask.mode === 'blur-bg') {
+        const src = sourceVideoRef.current as HTMLVideoElement | null;
+        if (src && src.videoWidth > 0) {
+          ctx.filter = 'blur(10px)';
+          ctx.drawImage(src, 0, 0, mw, mh);
+          ctx.filter = 'none';
+        }
+      } else {
+        // spotlight: translucent dim. cutout: opaque cover.
+        ctx.fillStyle = mask.mode === 'cutout' ? 'rgba(0,0,0,1)' : 'rgba(0,0,0,0.66)';
+        ctx.fillRect(0, 0, mw, mh);
+      }
+      // Punch the subject through (keep it from the real video underneath).
+      ctx.globalCompositeOperation = 'destination-out';
+      if (featherPx > 0) ctx.filter = `blur(${featherPx}px)`;
+      ctx.drawImage(stencil, 0, 0, mw, mh);
+      ctx.filter = 'none';
+      ctx.globalCompositeOperation = 'source-over';
+    };
+
+    const targetTime = clip.sourceIn + localTime;
+    if (Math.abs(maskVideo.currentTime - targetTime) > 0.12) {
+      try {
+        maskVideo.currentTime = targetTime;
+      } catch {
+        /* not seekable yet */
+      }
+    }
+
+    const loop = () => {
+      draw();
+      rafRef.current = requestAnimationFrame(loop);
+    };
+    if (isPlaying) {
+      if (rafRef.current === null) rafRef.current = requestAnimationFrame(loop);
+    } else {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+      // One-shot after the seek settles.
+      const onSeeked = () => draw();
+      maskVideo.addEventListener('seeked', onSeeked, { once: true });
+      requestAnimationFrame(draw);
+      return () => maskVideo.removeEventListener('seeked', onSeeked);
+    }
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+  }, [clip.sourceIn, clip.mask, isPlaying, localTime, mask, sourceVideoRef]);
+
+  if (!mask) return null;
+  return (
+    <>
+      <video
+        aria-hidden="true"
+        muted
+        playsInline
+        preload="auto"
+        ref={maskVideoRef}
+        src={maskUrl}
+        style={{ display: 'none' }}
+      />
+      <canvas aria-hidden="true" className="mask-overlay" ref={canvasRef} style={style} />
+    </>
+  );
+}
+
 type PreviewLayerAudioProps = {
   asset: ProjectAsset;
   clip: TimelineClip;
@@ -4056,6 +4190,21 @@ function EditorWorkspace({
                   ref={previewCanvasRef}
                   style={activeClipTransformStyle}
                 />
+                {activeClip &&
+                activeTimeline &&
+                activePrimaryKind === 'video' &&
+                activeClip.mask?.enabled &&
+                maskPreviewUrls[activeClip.mask.maskKey] ? (
+                  <MaskSpotlightOverlay
+                    clip={activeClip}
+                    isPlaying={isPlaying}
+                    key={activeClip.mask.maskKey}
+                    localTime={activeTimeline.localTime}
+                    maskUrl={maskPreviewUrls[activeClip.mask.maskKey]}
+                    sourceVideoRef={activeMediaRef}
+                    style={activeClipTransformStyle}
+                  />
+                ) : null}
                 {activeClip && activePrimaryKind === 'video' ? (
                   <button
                     aria-label="Move selected clip on canvas"
