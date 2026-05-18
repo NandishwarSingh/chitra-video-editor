@@ -2819,10 +2819,28 @@ function EditorWorkspace({
     setExportStatus({ error: null, progress: 0, state: 'running' });
     performanceMonitor.markTranscodeStart('export');
 
+    // Gather matte mp4s for clips with an enabled mask so the export bakes
+    // the same spotlight/cutout/blur-bg the preview shows (WYSIWYG).
+    const maskKeys = [
+      ...new Set(
+        present.clips
+          .map((c) => (c.mask?.enabled ? c.mask.maskKey : null))
+          .filter((k): k is string => Boolean(k)),
+      ),
+    ];
+    const masks: Array<{ file: File; key: string }> = [];
+    for (const key of maskKeys) {
+      const stored = await getAssetMask(key);
+      if (stored) {
+        masks.push({ file: new File([stored.maskVideo], `${key}.mp4`, { type: 'video/mp4' }), key });
+      }
+    }
+
     const job = runTranscodeJob({
       assets: present.assets.map((asset) => ({ file: asset.file, id: asset.id, kind: asset.kind })),
       clips: present.clips,
       kind: 'export-timeline-mp4',
+      masks,
       onProgress: ({ progress }) => {
         performanceMonitor.markTranscodeProgress('export', progress);
         setExportStatus({ error: null, progress: Math.round(progress * 100), state: 'running' });

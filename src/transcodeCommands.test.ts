@@ -457,4 +457,66 @@ describe('transcode command builders', () => {
     expect(command).toContain('[base2]');
     expect(args).toContain('layered.mp4');
   });
+
+  it('bakes a spotlight mask subgraph and appends the matte input', () => {
+    const args = buildLayeredTimelineArgs({
+      assets: [{ id: 'asset-a', inputPath: 'a.mp4', kind: 'video' }],
+      clips: [
+        {
+          assetId: 'asset-a',
+          effects: DEFAULT_EFFECT_SETTINGS,
+          fadeIn: 0,
+          fadeOut: 0,
+          id: 'clip-a',
+          mask: { enabled: true, feather: 0.25, invert: false, maskKey: 'mask:clip-a:1', mode: 'spotlight' },
+          muted: false,
+          sourceIn: 0,
+          sourceOut: 4,
+          timelineStart: 0,
+          trackId: 'video-1',
+          transform: DEFAULT_CLIP_TRANSFORM,
+          volume: 1,
+        },
+      ],
+      maskInputIndexByKey: { 'mask:clip-a:1': 1 },
+      maskInputPaths: ['mask-0.mp4'],
+      outputHeight: 1080,
+      outputPath: 'm.mp4',
+      outputWidth: 1920,
+      textOverlays: [],
+      trackOrder: ['video-1'],
+    });
+    const command = args.join(' ');
+    // Matte appended as input #1 (after the single asset).
+    expect(args.join(' ')).toContain('-i mask-0.mp4');
+    // Mask subgraph: matte trimmed/gray, scaled to the clip, spotlight via
+    // split + dim + maskedmerge, feather blur applied.
+    expect(command).toContain('[1:v]');
+    expect(command).toContain('format=gray');
+    expect(command).toContain('scale2ref=w=iw:h=ih');
+    expect(command).toContain('maskedmerge');
+    expect(command).toContain('gblur=sigma=2');
+  });
+
+  it('a clip with no mask is byte-identical to the pre-mask path', () => {
+    const clip = {
+      assetId: 'asset-a',
+      effects: DEFAULT_EFFECT_SETTINGS,
+      fadeIn: 0,
+      fadeOut: 0,
+      id: 'clip-a',
+      muted: false,
+      sourceIn: 0,
+      sourceOut: 4,
+      timelineStart: 0,
+      trackId: 'video-1',
+      transform: DEFAULT_CLIP_TRANSFORM,
+      volume: 1,
+    };
+    const base = { assets: [{ id: 'asset-a', inputPath: 'a.mp4', kind: 'video' as const }], clips: [clip], outputHeight: 1080, outputPath: 'o.mp4', outputWidth: 1920, textOverlays: [], trackOrder: ['video-1'] };
+    const withoutMaskOpts = buildLayeredTimelineArgs(base).join(' ');
+    const withNullMask = buildLayeredTimelineArgs({ ...base, clips: [{ ...clip, mask: null }] }).join(' ');
+    expect(withNullMask).toBe(withoutMaskOpts);
+    expect(withoutMaskOpts).not.toContain('maskedmerge');
+  });
 });

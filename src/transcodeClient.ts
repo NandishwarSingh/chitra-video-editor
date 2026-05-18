@@ -23,6 +23,8 @@ export type RunTranscodeJobOptions = {
   file?: File;
   inPoint?: number;
   kind: TranscodeKind;
+  /** Grayscale matte mp4s for clips with an enabled mask, by maskKey. */
+  masks?: Array<{ file: File; key: string }>;
   onProgress?: (progress: TranscodeProgress) => void;
   outputFps?: number;
   outputHeight?: number;
@@ -70,6 +72,7 @@ export function runTranscodeJob({
   file,
   inPoint = 0,
   kind,
+  masks = [],
   onProgress,
   outputFps,
   outputHeight,
@@ -130,6 +133,7 @@ export function runTranscodeJob({
       inPoint,
       jobId,
       kind,
+      masks,
       outputFps,
       outputHeight,
       outputWidth,

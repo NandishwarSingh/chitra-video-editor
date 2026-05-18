@@ -29,6 +29,7 @@ type RunRequest = {
   inPoint: number;
   jobId: string;
   kind: TranscodeKind;
+  masks?: Array<{ file: File; key: string }>;
   outputFps?: number;
   outputHeight?: number;
   outputWidth?: number;
@@ -124,6 +125,12 @@ function hasLayeredTimeline(
   // Segment-and-concat path can't handle audio-only inputs (-map 0:v:0 fails),
   // so force the layered compositor whenever any clip points at an audio asset.
   if (clips.some((clip) => assetKindById.get(clip.assetId) === 'audio')) {
+    return true;
+  }
+
+  // Only the layered compositor bakes mask-driven effects; a single masked
+  // clip must not fall through to copy/segment (which would drop the mask).
+  if (clips.some((clip) => clip.mask?.enabled)) {
     return true;
   }
 
@@ -236,6 +243,17 @@ async function runTimelineExportJob(request: RunRequest, ffmpeg: FFmpeg, started
     await ffmpeg.writeFile(inputPath, await fetchFile(asset.file));
   }
 
+  // Mask matte mp4s are appended after the asset inputs, so a matte's
+  // FFmpeg input index is assets.length + its ordinal here.
+  const masks = request.masks ?? [];
+  const maskInputIndexByKey: Record<string, number> = {};
+  for (const [i, mask] of masks.entries()) {
+    const maskPath = `mask-${i}.mp4`;
+    cleanupPaths.push(maskPath);
+    await ffmpeg.writeFile(maskPath, await fetchFile(mask.file));
+    maskInputIndexByKey[mask.key] = assets.length + i;
+  }
+
   if (hasLayeredTimeline(clips, assetKindById)) {
     const outputPath = 'layered-timeline-export.mp4';
     cleanupPaths.push(outputPath);
@@ -247,6 +265,8 @@ async function runTimelineExportJob(request: RunRequest, ffmpeg: FFmpeg, started
           kind: asset.kind ?? 'video',
         })),
         clips,
+        maskInputIndexByKey,
+        maskInputPaths: masks.map((_, i) => `mask-${i}.mp4`),
         outputFps: request.outputFps,
         outputHeight: request.outputHeight,
         outputPath,

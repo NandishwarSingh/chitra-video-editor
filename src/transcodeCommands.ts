@@ -12,12 +12,21 @@ export type ExportMp4CommandOptions = {
   outputPath: string;
 };
 
+export type TimelineExportMask = {
+  enabled: boolean;
+  feather: number;
+  invert: boolean;
+  maskKey: string;
+  mode: 'blur-bg' | 'cutout' | 'spotlight';
+};
+
 export type TimelineExportClip = {
   assetId: string;
   effects: EffectSettings;
   fadeIn: number;
   fadeOut: number;
   id: string;
+  mask?: TimelineExportMask | null;
   muted: boolean;
   sourceIn: number;
   sourceOut: number;
@@ -56,6 +65,14 @@ export type TimelineLayeredExportOptions = {
   assets: Array<{ id: string; inputPath: string; kind?: 'audio' | 'video' }>;
   clips: TimelineExportClip[];
   duration?: number;
+  /** maskKey → FFmpeg input index for that clip's grayscale matte mp4.
+   *  Only clips whose mask is enabled AND present here get the mask
+   *  subgraph; every other clip takes the exact pre-mask code path. */
+  maskInputIndexByKey?: Record<string, number>;
+  /** Matte mp4 paths, appended as `-i` after the asset inputs. Ordering
+   *  MUST match the indices in `maskInputIndexByKey`
+   *  (input index = assets.length + position here). */
+  maskInputPaths?: string[];
   outputFps?: number;
   outputHeight?: number;
   outputPath: string;
@@ -441,6 +458,8 @@ export function buildLayeredTimelineArgs({
   duration,
   outputFps = 30,
   outputHeight = 720,
+  maskInputIndexByKey = {},
+  maskInputPaths = [],
   outputPath,
   outputWidth = 1280,
   textOverlays,
@@ -456,7 +475,10 @@ export function buildLayeredTimelineArgs({
       ...clips.map((clip) => clip.timelineStart + Math.max(0.1, clip.sourceOut - clip.sourceIn)),
       ...textOverlays.map((overlay) => overlay.end),
     );
-  const args = assets.flatMap((asset) => ['-i', asset.inputPath]);
+  const args = [
+    ...assets.flatMap((asset) => ['-i', asset.inputPath]),
+    ...maskInputPaths.flatMap((path) => ['-i', path]),
+  ];
   const filters: string[] = [`color=c=black:s=${outputWidth}x${outputHeight}:d=${formatSeconds(timelineDuration)}:r=${outputFps}[base0]`];
   const orderedClips = [...clips].sort((a, b) => {
     const trackDelta = (trackIndexById.get(a.trackId) ?? 0) - (trackIndexById.get(b.trackId) ?? 0);
@@ -478,17 +500,61 @@ export function buildLayeredTimelineArgs({
 
     if (assetKind === 'video') {
       const effectFilter = createFfmpegEffectFilter(clip.effects);
-      const videoFilters = [
-        `trim=start=${formatSeconds(clip.sourceIn)}:end=${formatSeconds(clip.sourceOut)}`,
-        `setpts=PTS-STARTPTS+${formatSeconds(clip.timelineStart)}/TB`,
-        `fps=${outputFps}`,
-        ...createVideoTransformFilters(clip, outputWidth, outputHeight),
-        effectFilter ? `eq=${effectFilter}` : null,
-        'format=rgba',
-      ].filter(Boolean);
       const videoLabel = `v${index}`;
       const nextBaseLabel = `base${index + 1}`;
-      filters.push(`[${inputIndex}:v]${videoFilters.join(',')}[${videoLabel}]`);
+      const maskIdx =
+        clip.mask?.enabled && clip.mask.maskKey in maskInputIndexByKey
+          ? maskInputIndexByKey[clip.mask.maskKey]
+          : undefined;
+
+      if (maskIdx === undefined || !clip.mask) {
+        // Unchanged pre-mask path.
+        const videoFilters = [
+          `trim=start=${formatSeconds(clip.sourceIn)}:end=${formatSeconds(clip.sourceOut)}`,
+          `setpts=PTS-STARTPTS+${formatSeconds(clip.timelineStart)}/TB`,
+          `fps=${outputFps}`,
+          ...createVideoTransformFilters(clip, outputWidth, outputHeight),
+          effectFilter ? `eq=${effectFilter}` : null,
+          'format=rgba',
+        ].filter(Boolean);
+        filters.push(`[${inputIndex}:v]${videoFilters.join(',')}[${videoLabel}]`);
+      } else {
+        // Mask subgraph: process clip + matte in asset space (same
+        // trim/setpts/fps so frames align), composite per mode, THEN apply
+        // the shared transform/effects so the matte stays registered.
+        const m = clip.mask;
+        const trimSet = `trim=start=${formatSeconds(clip.sourceIn)}:end=${formatSeconds(
+          clip.sourceOut,
+        )},setpts=PTS-STARTPTS+${formatSeconds(clip.timelineStart)}/TB,fps=${outputFps}`;
+        const cv = `cv${index}`;
+        const rawm = `rm${index}`;
+        const mlbl = `mk${index}`;
+        const cvv = `cvv${index}`;
+        const merged = `mg${index}`;
+        filters.push(`[${inputIndex}:v]${trimSet}[${cv}]`);
+        filters.push(`[${maskIdx}:v]${trimSet},format=gray[${rawm}]`);
+        // Scale the matte to the clip-video size so the merges line up.
+        filters.push(`[${rawm}][${cv}]scale2ref=w=iw:h=ih[${mlbl}][${cvv}]`);
+        const featherSigma = Math.round(m.feather * 8);
+        if (featherSigma > 0) filters.push(`[${mlbl}]gblur=sigma=${featherSigma}[${mlbl}]`);
+        if (m.invert) filters.push(`[${mlbl}]negate[${mlbl}]`);
+        if (m.mode === 'cutout') {
+          filters.push(`[${cvv}]format=rgba[${cvv}r];[${cvv}r][${mlbl}]alphamerge[${merged}]`);
+        } else {
+          const dim = m.mode === 'blur-bg' ? `gblur=sigma=18` : `eq=brightness=-0.45:saturation=0.35`;
+          // maskedmerge(base, overlay, mask): mask-bright→overlay,
+          // mask-dark→base. Subject(white)=sharp/bright, bg=dim/blur.
+          filters.push(
+            `[${cvv}]split[${cvv}a][${cvv}b];[${cvv}b]${dim}[${cvv}d];[${cvv}d][${cvv}a][${mlbl}]maskedmerge[${merged}]`,
+          );
+        }
+        const tailFilters = [
+          ...createVideoTransformFilters(clip, outputWidth, outputHeight),
+          effectFilter ? `eq=${effectFilter}` : null,
+          'format=rgba',
+        ].filter(Boolean);
+        filters.push(`[${merged}]${tailFilters.join(',')}[${videoLabel}]`);
+      }
       filters.push(
         `[${baseLabel}][${videoLabel}]overlay=0:0:eof_action=pass:enable='between(t,${formatSeconds(clip.timelineStart)},${formatSeconds(
           clip.timelineStart + clipDuration,
